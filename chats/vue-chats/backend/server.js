@@ -150,23 +150,16 @@ async function startServer() {
 
 startServer();
 
-// Manejar error de puerto en uso
+// Manejar error de puerto en uso — no cambiar de puerto (evita backends duplicados)
 server.on("error", (err) => {
   if (err.code === "EADDRINUSE") {
-    portTries++;
-    if (portTries < MAX_PORT_TRIES) {
-      console.warn(
-        `\u26A0\uFE0F El puerto ${PORT} está en uso. Intentando con el puerto ${PORT + 1}...`,
-      );
-      PORT++;
-      setTimeout(() => startServer(), 500);
-    } else {
-      console.error(
-        `\u274C No se pudo encontrar un puerto libre después de ${MAX_PORT_TRIES} intentos.`,
-      );
-      process.exit(1);
-    }
-  } else {
-    throw err;
+    console.error(
+      `\n❌ El puerto ${PORT} ya está en uso.\n` +
+        `   Cierra el proceso anterior o ejecuta:\n` +
+        `   netstat -ano | findstr :${PORT}\n` +
+        `   taskkill /PID <pid> /F\n`,
+    );
+    process.exit(1);
   }
+  throw err;
 });

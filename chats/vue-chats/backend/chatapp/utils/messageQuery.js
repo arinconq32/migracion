@@ -26,10 +26,21 @@ function buildMessageFilters(convIdStr, conv = null) {
   }
 
   const filters = [];
+  const convIdNormalized = String(convIdStr || "").trim();
+  if (convIdNormalized) {
+    filters.push(
+      { conversacionId: convIdNormalized },
+      { conversacion_id: convIdNormalized },
+    );
+  }
+
   if (objectIds.size) {
     const oidList = [...objectIds].map((id) => new mongoose.Types.ObjectId(id));
-    filters.push({ conversacionId: { $in: oidList } });
-    filters.push({ conversacion_id: { $in: oidList } });
+    const oidStrings = [...objectIds];
+    filters.push(
+      { conversacionId: { $in: [...oidList, ...oidStrings] } },
+      { conversacion_id: { $in: [...oidList, ...oidStrings] } },
+    );
   }
 
   for (const legacyId of legacyNumeric) {

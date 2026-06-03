@@ -11,10 +11,7 @@ const nextConfig: NextConfig = {
     });
     config.watchOptions = {
       ...config.watchOptions,
-      ignored: [
-        "**/vue-chats/**",
-        "**/src/app/chats/**",
-      ],
+      ignored: ["**/vue-chats/**"],
     };
     return config;
   },
@@ -31,7 +28,7 @@ const nextConfig: NextConfig = {
 
   // Evita que el trazado de archivos entre en carpetas duplicadas del chat
   outputFileTracingExcludes: {
-    "*": ["**/vue-chats/**", "**/src/app/chats/**"],
+    "*": ["**/vue-chats/**"],
   },
 };
 

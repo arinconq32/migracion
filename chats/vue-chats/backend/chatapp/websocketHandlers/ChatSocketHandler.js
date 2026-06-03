@@ -409,6 +409,10 @@ class ChatSocketHandler {
           pendingPersist: Boolean(this.chatModel.bufferMessage),
         };
 
+        console.log(
+          `[chat_message] conv=${convId} id=${messageId} texto="${mensaje.slice(0, 40)}"`,
+        );
+
         socket.emit("message_confirmed", {
           convId: Number(convId) || convId,
           msg: outgoing,

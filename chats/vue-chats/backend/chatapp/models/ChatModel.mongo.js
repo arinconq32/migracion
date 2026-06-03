@@ -834,12 +834,19 @@ class ChatModelMongo {
       ts: extra.timestamp ? new Date(extra.timestamp) : new Date(),
       timestamp: extra.timestamp || Date.now(),
       origen: extra.origen || "web",
-      ...(extra.id ? { id: extra.id } : {}),
       ...(archivoUrl ? { archivoUrl, archivo_url: archivoUrl } : {}),
     });
+
+    msg.id = extra.id || extra.tempId || String(msg._id);
+    msg.legacyId = msg.legacyId ?? msg.id;
+
     await msg.save();
 
     await safeDel(`mensajes:${convIdStr}`);
+
+    console.log(
+      `[Mongo] Mensaje guardado conv=${convIdStr} id=${msg._id} texto="${String(texto || "").slice(0, 40)}"`,
+    );
 
     const conv = await this.findConversationByAnyId(convIdStr);
     if (conv?._id) {
