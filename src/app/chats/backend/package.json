@@ -1,0 +1,21 @@
+{
+  "name": "chats-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "chats": "file:..",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "mongoose": "^9.6.1",
+    "mysql2": "^3.22.3",
+    "redis": "^5.8.2",
+    "socket.io": "^4.8.1",
+    "uuid": "^11.1.0"
+  }
+}

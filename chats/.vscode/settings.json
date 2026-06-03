@@ -1,0 +1,9 @@
+{
+  "npm.exclude": "**/node_modules/**",
+  "npm.scriptExplorerExclude": "**/node_modules/**",
+  "files.watcherExclude": {
+    "**/vue-chats/node_modules/**": true,
+    "**/vue-chats/backend/node_modules/**": true,
+    "**/vue-chats/dist/**": true
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "migracion-interfaz-root",
+  "private": true,
+  "scripts": {
+    "dev": "npm run dev:frontend",
+    "dev:frontend": "npm --prefix chats run dev",
+    "dev:backend": "npm --prefix chats/vue-chats/backend run dev",
+    "build": "npm --prefix chats run build",
+    "start": "npm --prefix chats run start",
+    "lint": "npm --prefix chats run lint"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "chats",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:socket": "npm --prefix backend run dev",
+    "build": "vite build",
+    "build:embed": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "axios": "^1.16.0",
+    "mongoose": "^9.6.1",
+    "pinia": "^2.3.1",
+    "socket.io-client": "^4.8.3",
+    "vue": "^3.5.32"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.6",
+    "vite": "^8.0.8",
+    "vite-plugin-vue-devtools": "^8.1.1"
+  },
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  }
+}
