@@ -98,6 +98,8 @@ export function isSocketInitialized() {
   return isSocketConnected.value;
 }
 
+export { isSocketConnected };
+
 /**
  * Emite un evento al servidor
  */
@@ -217,6 +219,10 @@ export function registrarListenersSocket(handlers = {}) {
   // Lista de agentes internos
   socket.value.on('lista_agentes_internos', (payload) => {
     handlers.onInternalAgentsList?.(payload);
+  });
+
+  socket.value.on('internal_chat_error', (payload) => {
+    handlers.onInternalChatError?.(payload);
   });
 
   // Colas disponibles
@@ -689,6 +695,35 @@ export function obtenerInformacionContacto(numeroAgente) {
 /**
  * Emite un mensaje de chat
  */
+export function enviarMensajeInterno(
+  { toAgentId, text, tipo = 'texto', archivo_url, archivoUrl } = {},
+  callback,
+) {
+  if (!isSocketConnected.value) {
+    console.warn('Socket no conectado. No se puede enviar mensaje interno.');
+    callback?.({ ok: false, error: 'Socket no conectado' });
+    return;
+  }
+  const target = String(toAgentId || '').trim();
+  const body = String(text || '').trim();
+  const mediaUrl = String(archivo_url || archivoUrl || '').trim();
+  const tipoNorm = String(tipo || 'texto').trim().toLowerCase() || 'texto';
+  if (!target || (!body && !mediaUrl)) {
+    callback?.({ ok: false, error: 'Destino o contenido vacío' });
+    return;
+  }
+  socket.value.emit(
+    'internal_chat_message',
+    {
+      toAgentId: target,
+      text: body || '',
+      tipo: tipoNorm,
+      archivo_url: mediaUrl || null,
+    },
+    (res) => callback?.(res),
+  );
+}
+
 export function enviarMensajeChat({ convId, text, origen = 'web', numero = null, tempId = null }) {
   if (!isSocketConnected.value) {
     console.warn('Socket no conectado. Mensaje no enviado.');
@@ -818,6 +853,7 @@ export default {
   obtenerListaContactos,
   obtenerInformacionContacto,
   enviarMensajeChat,
+  enviarMensajeInterno,
   abrirChat,
   cerrarChat,
   reabrirChat,

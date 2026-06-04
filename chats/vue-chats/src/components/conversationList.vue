@@ -38,9 +38,46 @@ import {
   formatPhoneDisplay,
 } from "@/utils/contactDisplay";
 import { resolveAgentIdFromSources } from "@/utils/agentId";
+import {
+  buildInternalConvId,
+  fetchInternalAgents,
+  registerInternalIdentity,
+} from "@/composables/useInternalChatSocket";
 import { getApiBase } from "@/utils/apiBase";
+import {
+  activarAlertasCompletas,
+  estadoPermisoNotificacion,
+  tienePermisoNotificacionConcedido,
+  navegadorSoportaNotificaciones,
+} from "@/composables/useNotificaciones";
 
 const store = useChatStore();
+const permisoNotificaciones = ref(estadoPermisoNotificacion());
+const activandoAlertas = ref(false);
+
+const mostrarBannerAlertas = computed(
+  () =>
+    navegadorSoportaNotificaciones() &&
+    !tienePermisoNotificacionConcedido(),
+);
+
+const textoBannerAlertas = computed(() => {
+  if (permisoNotificaciones.value === "denied") {
+    return "Notificaciones bloqueadas. Actívalas en la configuración del navegador para este sitio.";
+  }
+  return "Haz clic para activar el sonido y las notificaciones del navegador al recibir mensajes.";
+});
+
+async function onActivarAlertas() {
+  if (activandoAlertas.value) return;
+  activandoAlertas.value = true;
+  try {
+    const res = await activarAlertasCompletas();
+    permisoNotificaciones.value = res.permiso;
+  } finally {
+    activandoAlertas.value = false;
+  }
+}
 const { contacts, fetchContacts, loading: loadingContacts } = useContacts();
 
 async function cargarCatalogoEtiquetas() {
@@ -694,6 +731,62 @@ const sections = computed(() => [
     items: groupedConversations.value.closed,
   },
 ]);
+
+const internalAgentItems = computed(() =>
+  (store.agentesInternos || []).map((agent) => {
+    const peerId = String(agent.id);
+    const preview = store.ultimoInternoPorPeer?.[peerId];
+    return {
+      id: buildInternalConvId(agent.id),
+      name: agent.nombre || `Agente ${agent.id}`,
+      nombre: agent.nombre || `Agente ${agent.id}`,
+      lastMessage:
+        preview?.lastMessage || agent.ultimoMensaje || "Chat interno",
+      lastMessageTime: preview?.lastMessageTime,
+      online: agent.estado === "online",
+      isInternalAgent: true,
+      peerAgentId: peerId,
+      unread: Number(store.noLeidosInternosPorPeer?.[peerId] || 0),
+    };
+  }),
+);
+
+const internalSections = computed(() => [
+  {
+    key: "agents",
+    label: "Agentes en línea",
+    items: internalAgentItems.value,
+  },
+]);
+
+const listSections = computed(() =>
+  tipoConversacion.value === "interno"
+    ? internalSections.value
+    : sections.value,
+);
+
+function refrescarAgentesInternos() {
+  registerInternalIdentity(obtenerAgenteIdActual());
+  fetchInternalAgents((agentes) => store.setAgentesInternos(agentes));
+}
+
+watch(
+  tipoConversacion,
+  (mode) => {
+    store.setInternoListaVisible(mode === "interno");
+    if (mode !== "interno") return;
+    refrescarAgentesInternos();
+  },
+  { immediate: true },
+);
+
+onMounted(() => {
+  const socket = getSocket();
+  if (!socket) return;
+  socket.on("connect", () => {
+    if (tipoConversacion.value === "interno") refrescarAgentesInternos();
+  });
+});
 </script>
 
 <template>
@@ -746,6 +839,18 @@ const sections = computed(() => [
       />
     </div>
 
+    <div v-if="mostrarBannerAlertas" class="alertas-banner" role="status">
+      <span class="alertas-banner-text">{{ textoBannerAlertas }}</span>
+      <button
+        type="button"
+        class="alertas-banner-btn"
+        :disabled="activandoAlertas"
+        @click="onActivarAlertas"
+      >
+        {{ activandoAlertas ? "Activando…" : "Activar alertas" }}
+      </button>
+    </div>
+
     <!-- Selector de tipo de conversación -->
     <div class="tipo-conv-selector">
       <button
@@ -756,11 +861,36 @@ const sections = computed(() => [
         <span class="tipo-btn-icon">💬</span> Clientes
       </button>
       <button
-        :class="['tipo-btn', { active: tipoConversacion === 'interno' }]"
+        :class="[
+          'tipo-btn',
+          'tipo-btn-interno',
+          { active: tipoConversacion === 'interno', 'has-unread': store.tieneNoLeidosInternos },
+        ]"
         @click="tipoConversacion = 'interno'"
         type="button"
+        :aria-label="
+          store.tieneNoLeidosInternos
+            ? 'Interno, mensajes sin leer'
+            : 'Interno'
+        "
       >
-        <span class="tipo-btn-icon">👥</span> Interno
+        <span
+          class="tipo-btn-icon-wrap"
+          :class="{ 'has-notify': store.tieneNoLeidosInternos }"
+        >
+          <span class="tipo-btn-icon">👥</span>
+          <span
+            v-if="store.tieneNoLeidosInternos"
+            class="tipo-btn-notify-halo"
+            aria-hidden="true"
+          ></span>
+        </span>
+        <span class="tipo-btn-label">Interno</span>
+        <span
+          v-if="store.tieneNoLeidosInternos"
+          class="tipo-btn-notify-mark"
+          aria-hidden="true"
+        ></span>
       </button>
     </div>
     <div class="filters-row">
@@ -786,8 +916,15 @@ const sections = computed(() => [
     </div>
 
     <div class="sections-wrap">
+      <p v-if="tipoConversacion === 'interno'" class="interno-hint">
+        Agente actual (URL):
+        <strong>{{ obtenerAgenteIdActual() }}</strong>
+        — abre otra pestaña con otro
+        <code>?agentId=</code> para probar entre agentes.
+      </p>
+
       <section
-        v-for="section in sections"
+        v-for="section in listSections"
         :key="section.key"
         class="section-block"
       >
@@ -797,7 +934,11 @@ const sections = computed(() => [
         </div>
 
         <div v-if="section.items.length === 0" class="empty-section">
-          Sin conversaciones
+          {{
+            tipoConversacion === "interno"
+              ? "No hay otros agentes conectados"
+              : "Sin conversaciones"
+          }}
         </div>
 
         <div
@@ -852,9 +993,16 @@ const sections = computed(() => [
                 <span v-if="formatListTime(item.lastMessageTime)" class="contact-time">
                   {{ formatListTime(item.lastMessageTime) }}
                 </span>
-                <span v-if="item.unread" class="contact-badge">{{
-                  item.unread
-                }}</span>
+                <span
+                  v-if="item.unread && !item.isInternalAgent"
+                  class="contact-badge"
+                  >{{ item.unread }}</span
+                >
+                <span
+                  v-else-if="item.unread && item.isInternalAgent"
+                  class="contact-unread-dot"
+                  aria-label="Sin leer"
+                ></span>
               </div>
             </div>
 
@@ -3033,6 +3181,61 @@ const sections = computed(() => [
   }
 }
 
+.interno-hint {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #475569;
+  background: #eef2ff;
+  border-radius: 8px;
+}
+
+.interno-hint code {
+  font-size: 10px;
+}
+
+.alertas-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #fff8f0 0%, #f0f7e8 100%);
+  border: 1px solid rgba(88, 128, 68, 0.25);
+}
+
+.alertas-banner-text {
+  flex: 1;
+  font-size: 11px;
+  line-height: 1.35;
+  color: #3d4f32;
+}
+
+.alertas-banner-btn {
+  flex-shrink: 0;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: linear-gradient(145deg, #6b9a52 0%, #588044 100%);
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(88, 128, 68, 0.25);
+}
+
+.alertas-banner-btn:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.alertas-banner-btn:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
 .tipo-conv-selector {
   display: flex;
   justify-content: center;
@@ -3078,5 +3281,106 @@ const sections = computed(() => [
   color: var(--color-primary-hover);
   border: 1.2px solid var(--color-primary-hover);
   box-shadow: 0 1.5px 6px 0 rgba(37, 99, 235, 0.08);
+}
+
+.tipo-btn-interno {
+  gap: 5px;
+  padding-right: 10px;
+}
+
+.tipo-btn-interno.has-unread:not(.active) {
+  border-color: rgba(220, 90, 72, 0.45);
+  background: linear-gradient(180deg, #fff8f6 0%, #f5efe8 100%);
+  box-shadow:
+    0 0 0 1px rgba(220, 90, 72, 0.1),
+    0 2px 8px rgba(220, 90, 72, 0.12);
+}
+
+.tipo-btn-interno.has-unread.active {
+  box-shadow:
+    0 0 0 1px rgba(220, 90, 72, 0.2),
+    0 1.5px 7px 0 rgba(31, 122, 255, 0.1);
+}
+
+.tipo-btn-icon-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.tipo-btn-icon-wrap.has-notify .tipo-btn-icon {
+  transform: scale(0.96);
+}
+
+.tipo-btn-notify-halo {
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    rgba(248, 113, 113, 0.55) 0%,
+    rgba(248, 113, 113, 0) 68%
+  );
+  animation: interno-notify-halo 2.2s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.tipo-btn-notify-mark {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  align-self: center;
+  background: linear-gradient(145deg, #fb923c 0%, #ef4444 55%, #dc2626 100%);
+  box-shadow:
+    0 0 0 2px #fff,
+    0 0 0 3px rgba(239, 68, 68, 0.18),
+    0 2px 6px rgba(220, 38, 38, 0.35);
+  animation: interno-notify-mark 2.2s ease-in-out infinite;
+}
+
+.tipo-btn-label {
+  line-height: 1;
+}
+
+@keyframes interno-notify-halo {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(0.92);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.08);
+  }
+}
+
+@keyframes interno-notify-mark {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.12);
+    opacity: 0.88;
+  }
+}
+
+.contact-unread-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  align-self: center;
+  background: linear-gradient(145deg, #fb923c 0%, #ef4444 55%, #dc2626 100%);
+  box-shadow:
+    0 0 0 2px #fff,
+    0 0 0 3px rgba(239, 68, 68, 0.15),
+    0 1px 4px rgba(220, 38, 38, 0.28);
 }
 </style>

@@ -453,6 +453,28 @@ class ChatSocketHandler {
       }
     });
 
+    socket.on("internal_chat_set_identity", (payload, callback) => {
+      if (!this.runtimeService) {
+        if (typeof callback === "function") {
+          callback({ ok: false, error: "runtime no configurado" });
+        }
+        return;
+      }
+
+      const response = this.runtimeService.setInternalAgentIdentity(
+        socket,
+        payload?.agentId,
+      );
+      if (response.ok) {
+        socket.emit("internal_agent_identity", { agentId: response.agentId });
+        this.io.emit("estado_agente_interno", {
+          agentId: response.agentId,
+          estado: "online",
+        });
+      }
+      if (typeof callback === "function") callback(response);
+    });
+
     socket.on("obtener_agentes_internos", (callback) => {
       if (!this.runtimeService) {
         if (typeof callback === "function") callback({ agentes: [] });

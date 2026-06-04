@@ -886,6 +886,162 @@ class ChatModelMongo {
     );
     return dedupeConversationsByPhone(normalized);
   }
+
+  normalizeInternalAgentId(value) {
+    return String(value ?? "")
+      .trim()
+      .toLowerCase();
+  }
+
+  getInternalConversationKey(agentA, agentB) {
+    const [left, right] = [
+      this.normalizeInternalAgentId(agentA),
+      this.normalizeInternalAgentId(agentB),
+    ].sort();
+    return `internal-room-${left}-${right}`;
+  }
+
+  buildInternalConversationIdFilters(conversacionId) {
+    const raw = String(conversacionId ?? "").trim();
+    const filters = [{ conversacionId: raw }, { conversacion_id: raw }];
+    const asNum = Number(raw);
+    if (Number.isFinite(asNum)) {
+      filters.push({ conversacionId: asNum }, { conversacion_id: asNum });
+    }
+    if (mongoose.Types.ObjectId.isValid(raw)) {
+      const oid = new mongoose.Types.ObjectId(raw);
+      filters.push({ conversacionId: oid }, { conversacion_id: oid });
+    }
+    return filters;
+  }
+
+  mapInternalMessageRow(row, viewerAgentId = null) {
+    const fromAgentId = String(row.emisorExten || row.emisor_exten || row.emisor || "");
+    const toAgentId = String(
+      row.receptorExten || row.receptor_exten || row.receptor || "",
+    );
+    const viewer = this.normalizeInternalAgentId(viewerAgentId);
+    let direction = row.direction || null;
+    if (!direction && viewer) {
+      direction =
+        this.normalizeInternalAgentId(fromAgentId) === viewer ? "out" : "in";
+    }
+
+    return {
+      id: String(row._id || row.id || row.legacyId || ""),
+      conversacionId: String(row.conversacionId || row.conversacion_id || ""),
+      fromAgentId,
+      toAgentId,
+      text: row.mensaje || row.text || "",
+      tipo: row.tipo || "texto",
+      archivo_url: row.archivoUrl || row.archivo_url || null,
+      direction,
+      timestamp:
+        row.ts instanceof Date
+          ? row.ts.getTime()
+          : Number(row.timestamp) || Date.now(),
+    };
+  }
+
+  async obtenerOCrearConversacionInterna(agenteAExten, agenteBExten) {
+    const agenteOrigen = this.normalizeInternalAgentId(agenteAExten);
+    const agenteDestino = this.normalizeInternalAgentId(agenteBExten);
+    const salaInternaKey = this.getInternalConversationKey(
+      agenteOrigen,
+      agenteDestino,
+    );
+
+    const db = mongoose.connection.db;
+    const col = db.collection("conversaciones_agente");
+    let doc = await col.findOne({ salaInternaKey });
+
+    if (!doc) {
+      const now = new Date();
+      const insert = {
+        salaInternaKey,
+        telefono: salaInternaKey,
+        agenteOrigen,
+        agenteDestino,
+        estado: "abierta",
+        origen: "interno",
+        inicio: now,
+        ultimaActividad: now,
+      };
+      const result = await col.insertOne(insert);
+      doc = { _id: result.insertedId, ...insert };
+    }
+
+    return {
+      id: String(doc._id),
+      salaInternaKey: doc.salaInternaKey || salaInternaKey,
+    };
+  }
+
+  async listarMensajesInternosPorConversacion(
+    conversacionId,
+    limite = 50,
+    viewerAgentId = null,
+  ) {
+    const limiteSeguro = Math.max(1, Math.min(Number(limite) || 50, 200));
+    const db = mongoose.connection.db;
+    const filters = this.buildInternalConversationIdFilters(conversacionId);
+    if (!filters.length) return [];
+
+    const rows = await db
+      .collection("mensajes_internos")
+      .find({ $or: filters })
+      .sort({ ts: 1, _id: 1 })
+      .limit(limiteSeguro)
+      .toArray();
+
+    return rows.map((row) => this.mapInternalMessageRow(row, viewerAgentId));
+  }
+
+  async guardarMensajeInternoEnBaseDatos({
+    conversacionId,
+    emisorExten,
+    receptorExten,
+    mensaje,
+    tipo = "texto",
+    archivoUrl = null,
+    direction = null,
+  }) {
+    const db = mongoose.connection.db;
+    const convFilters = this.buildInternalConversationIdFilters(conversacionId);
+    const conv = convFilters.length
+      ? await db.collection("conversaciones_agente").findOne({ $or: convFilters })
+      : null;
+
+    const convObjectId =
+      conv?._id ||
+      (mongoose.Types.ObjectId.isValid(String(conversacionId))
+        ? new mongoose.Types.ObjectId(String(conversacionId))
+        : null);
+
+    if (!convObjectId) {
+      throw new Error("INTERNAL_CONVERSATION_NOT_FOUND");
+    }
+
+    const now = new Date();
+    const doc = {
+      conversacionId: convObjectId,
+      emisorExten: String(emisorExten || ""),
+      receptorExten: String(receptorExten || ""),
+      mensaje: String(mensaje || ""),
+      tipo: tipo || "texto",
+      ts: now,
+      archivoUrl: archivoUrl || null,
+      direction: direction || null,
+    };
+
+    const result = await db.collection("mensajes_internos").insertOne(doc);
+    await db.collection("conversaciones_agente").updateOne(
+      { _id: convObjectId },
+      { $set: { ultimaActividad: now } },
+    );
+
+    return String(result.insertedId);
+  }
 }
 
 module.exports = ChatModelMongo;

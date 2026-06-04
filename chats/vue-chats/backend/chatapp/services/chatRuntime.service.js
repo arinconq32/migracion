@@ -39,8 +39,24 @@ class ChatRuntimeService {
     return this.normalizeAgentKey(value);
   }
 
-  getInternalAgentId({ exten, userId, socketId }) {
-    return this.normalizeInternalAgentId(exten || userId || socketId);
+  getInternalAgentId({ exten, userId, socketId, internalAgentId }) {
+    return this.normalizeInternalAgentId(
+      internalAgentId || exten || userId || socketId,
+    );
+  }
+
+  setInternalAgentIdentity(socket, agentId) {
+    const normalized = this.normalizeInternalAgentId(agentId);
+    if (!normalized || !socket?.id) {
+      return { ok: false, error: "ID de agente inválido" };
+    }
+
+    this.removeInternalAgentSocket(socket.id);
+    socket.data.agenteInternoId = normalized;
+    this.registerInternalAgentSocket(normalized, socket.id);
+    this.emitInternalAgentsList();
+
+    return { ok: true, agentId: normalized };
   }
 
   getInternalRoomId(agentA, agentB) {
@@ -910,6 +926,7 @@ class ChatRuntimeService {
     const mensajes = await this.chatModel.listarMensajesInternosPorConversacion(
       conversation.id,
       200,
+      fromAgentId,
     );
 
     socket.join(salaInternaId);
@@ -948,6 +965,7 @@ class ChatRuntimeService {
     const mensajes = await this.chatModel.listarMensajesInternosPorConversacion(
       conversation.id,
       limit,
+      fromAgentId,
     );
 
     return {
@@ -1005,18 +1023,26 @@ class ChatRuntimeService {
       archivo_url: archivoUrl,
     };
 
-    const receiverSockets = this.socketsByInternalAgent.get(toAgentId);
-    if (receiverSockets) {
-      receiverSockets.forEach((socketId) => {
+    socket.join(salaInternaId);
+
+    const emitInternalToAgent = (agentId, direction) => {
+      const sockets = this.socketsByInternalAgent.get(
+        this.normalizeInternalAgentId(agentId),
+      );
+      if (!sockets) return;
+      sockets.forEach((socketId) => {
         const targetSocket = this.io.sockets.sockets.get(socketId);
-        if (targetSocket) {
-          targetSocket.emit("internal_chat_message", {
-            ...messageBase,
-            direction: "in",
-          });
-        }
+        if (!targetSocket) return;
+        targetSocket.join(salaInternaId);
+        targetSocket.emit("internal_chat_message", {
+          ...messageBase,
+          direction,
+        });
       });
-    }
+    };
+
+    emitInternalToAgent(toAgentId, "in");
+    emitInternalToAgent(fromAgentId, "out");
 
     return {
       ok: true,

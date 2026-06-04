@@ -23,6 +23,13 @@ import {
   getSocket,
 } from "@/composables/useSocket";
 import { useChatStore } from "@/stores/chatStore";
+import { resolveAgentIdFromSources } from "@/utils/agentId";
+import {
+  buildInternalConvId,
+  parseInternalPeerId,
+  sendInternalChatMessage,
+  registerInternalIdentity,
+} from "@/composables/useInternalChatSocket";
 import {
   fetchMotivosCierreCatalogo,
   fetchTipificacionesCatalogo,
@@ -44,6 +51,7 @@ const props = defineProps({
 });
 
 const store = useChatStore();
+const agenteIdActual = resolveAgentIdFromSources();
 
 const emit = defineEmits(["send-message", "update-search-term"]);
 const newMessage = ref("");
@@ -234,7 +242,15 @@ const conversationEstado = computed(() => {
     .trim();
 });
 
+const isInternalChat = computed(() => {
+  const conv = props.conversation;
+  if (!conv) return false;
+  if (conv.isInternal) return true;
+  return String(conv.id || "").startsWith("internal:");
+});
+
 const canCerrarConversacion = computed(() => {
+  if (isInternalChat.value) return false;
   if (!props.conversation) return false;
 
   const convId = String(props.conversation.id || "").trim();
@@ -247,7 +263,9 @@ const canCerrarConversacion = computed(() => {
   return estado !== "cerrada" && estado !== "closed";
 });
 
-const showCloseMenuInHeader = computed(() => Boolean(props.conversation));
+const showCloseMenuInHeader = computed(
+  () => Boolean(props.conversation) && !isInternalChat.value,
+);
 
 const cargarMotivosSiFaltan = async () => {
   if (!props.conversation) return;
@@ -269,9 +287,34 @@ const abrirModalMotivosCierre = async () => {
   }
 };
 
+const messagesContainerRef = ref(null);
+
+function scrollMessagesToBottom() {
+  nextTick(() => {
+    const el = messagesContainerRef.value;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  });
+}
+
 onMounted(() => {
   cargarMotivosSiFaltan();
 });
+
+watch(
+  () => props.messages.length,
+  (len, prevLen) => {
+    if (!props.conversation || len === 0) return;
+    if (len >= (prevLen ?? 0)) scrollMessagesToBottom();
+  },
+);
+
+watch(
+  () => props.messages[props.messages.length - 1]?.id,
+  () => {
+    if (props.conversation) scrollMessagesToBottom();
+  },
+);
 
 watch(
   () => props.conversation?.id,
@@ -1568,6 +1611,18 @@ const getConversationPhone = () =>
       "",
   );
 
+const getInternalPeerId = () =>
+  String(
+    props.conversation?.peerAgentId ||
+      parseInternalPeerId(props.conversation?.id) ||
+      "",
+  ).trim();
+
+const getInternalStorageConvId = () => {
+  const peerId = getInternalPeerId();
+  return peerId ? buildInternalConvId(peerId) : "internal-general";
+};
+
 const inferTipoFromFile = (file) => {
   const mime = String(file?.type || "").toLowerCase();
   if (mime.startsWith("image/")) return "imagen";
@@ -1576,8 +1631,74 @@ const inferTipoFromFile = (file) => {
   return inferMultimediaTipoFrontend("archivo", file?.name || "");
 };
 
+const sendInternalUploadedMedia = async (file, tipoOverride = null) => {
+  const peerId = getInternalPeerId();
+  if (!peerId || !file) return;
+
+  const baseUrl = window.URL_BASE || "";
+  const tipo = tipoOverride || inferTipoFromFile(file);
+  const label = String(file.name || multimediaTypeLabel(tipo)).trim();
+  const tempId = `temp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+
+  registerInternalIdentity(agenteIdActual);
+  store.addInternalMessage(peerId, {
+    id: tempId,
+    direction: "out",
+    fromAgentId: agenteIdActual,
+    toAgentId: peerId,
+    text: label,
+    mensaje: label,
+    tipo,
+    timestamp: Date.now(),
+  });
+
+  const form = new FormData();
+  form.append("file", file, file.name || "archivo");
+  form.append("convId", getInternalStorageConvId());
+  form.append("mode", "interno");
+  form.append("toAgentId", peerId);
+
+  try {
+    const res = await fetch(`${baseUrl}/upload_file`, {
+      method: "POST",
+      body: form,
+    });
+    const data = await res.json();
+    if (!data?.archivo_url) return;
+
+    store.addInternalMessage(peerId, {
+      id: tempId,
+      direction: "out",
+      fromAgentId: agenteIdActual,
+      toAgentId: peerId,
+      text: label,
+      mensaje: label,
+      tipo,
+      archivo_url: data.archivo_url,
+      archivoUrl: data.archivo_url,
+      timestamp: Date.now(),
+    });
+
+    sendInternalChatMessage(
+      peerId,
+      { text: label, tipo, archivo_url: data.archivo_url },
+      (ack) => {
+        if (ack?.mensaje) {
+          store.addInternalMessage(peerId, ack.mensaje, agenteIdActual);
+        }
+      },
+    );
+  } catch (error) {
+    console.warn("Error subiendo archivo interno:", error);
+  }
+};
+
 const sendUploadedMedia = async (file, tipoOverride = null) => {
   if (!props.conversation || !file) return;
+  if (isInternalChat.value) {
+    await sendInternalUploadedMedia(file, tipoOverride);
+    return;
+  }
 
   const baseUrl = window.URL_BASE || "";
   const convId = String(props.conversation.id || "");
@@ -1628,8 +1749,74 @@ const sendUploadedMedia = async (file, tipoOverride = null) => {
   }
 };
 
+const sendInternalVoiceNote = async (blob) => {
+  const peerId = getInternalPeerId();
+  if (!peerId || !blob || blob.size === 0) return;
+
+  const tempId = `temp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  registerInternalIdentity(agenteIdActual);
+  store.addInternalMessage(peerId, {
+    id: tempId,
+    direction: "out",
+    fromAgentId: agenteIdActual,
+    toAgentId: peerId,
+    text: "Nota de voz",
+    mensaje: "Nota de voz",
+    tipo: "audio",
+    timestamp: Date.now(),
+  });
+
+  const baseUrl = window.URL_BASE || "";
+  const form = new FormData();
+  form.append("audio", blob, `audio_${Date.now()}.webm`);
+  form.append("mode", "interno");
+  form.append("toAgentId", peerId);
+  form.append("convId", getInternalStorageConvId());
+
+  const res = await fetch(`${baseUrl}/upload_chat_audio`, {
+    method: "POST",
+    body: form,
+  });
+  const data = await res.json();
+
+  if (!res.ok || !(data?.success || data?.ok) || !data?.archivo_url) {
+    throw new Error(data?.message || "No se pudo enviar la nota de voz");
+  }
+
+  store.addInternalMessage(peerId, {
+    id: tempId,
+    direction: "out",
+    fromAgentId: agenteIdActual,
+    toAgentId: peerId,
+    text: "Nota de voz",
+    mensaje: "Nota de voz",
+    tipo: "audio",
+    archivo_url: data.archivo_url,
+    archivoUrl: data.archivo_url,
+    timestamp: Date.now(),
+  });
+
+  sendInternalChatMessage(
+    peerId,
+    {
+      text: "Nota de voz",
+      tipo: "audio",
+      archivo_url: data.archivo_url,
+    },
+    (ack) => {
+      if (ack?.mensaje) {
+        store.addInternalMessage(peerId, ack.mensaje, agenteIdActual);
+      }
+    },
+  );
+};
+
 const sendVoiceNote = async (blob) => {
   if (!props.conversation || !blob || blob.size === 0) return;
+  if (isInternalChat.value) {
+    await sendInternalVoiceNote(blob);
+    return;
+  }
 
   const baseUrl = window.URL_BASE || "";
   const convId = String(props.conversation.id || "");
@@ -1902,7 +2089,7 @@ const canSendText = computed(
       />
     </div>
 
-    <div class="messages" v-if="props.conversation">
+    <div ref="messagesContainerRef" class="messages" v-if="props.conversation">
       <div v-if="props.messages.length === 0" class="messages-empty">
         {{
           props.searchTerm
@@ -2028,7 +2215,6 @@ const canSendText = computed(
         </button>
       </div>
 
-      <!-- Normal input row -->
       <div v-else class="composer-input-row">
         <button
           type="button"
@@ -2081,7 +2267,11 @@ const canSendText = computed(
           v-model="newMessage"
           type="text"
           class="composer-text-input"
-          placeholder="Escribe un mensaje..."
+          :placeholder="
+            isInternalChat
+              ? 'Mensaje, adjunto o nota de voz al agente...'
+              : 'Escribe un mensaje...'
+          "
           @keydown.enter.prevent="sendTextMessage"
         />
         <button

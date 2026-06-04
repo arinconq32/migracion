@@ -1,5 +1,6 @@
 <script setup>
 import { computed, ref, watch, onMounted } from "vue";
+import { storeToRefs } from "pinia";
 import ConversationList from "./conversationList.vue";
 import ConversationDetail from "./conversationDetail.vue";
 import NotificationPanel from "./notificationPanel.vue";
@@ -7,12 +8,20 @@ import ContactOptionsModal from "./ContactOptionsModal.vue";
 import { useChatStore } from "@/stores/chatStore";
 import { useChatSocket } from "@/composables/useChatSocket";
 import { resolveAgentIdFromSources } from "@/utils/agentId";
+import {
+  buildInternalConvId,
+  parseInternalPeerId,
+  openInternalChat,
+  mapInternalMessagesForUi,
+} from "@/composables/useInternalChatSocket";
 import { useAgentProfile } from "@/composables/useAgentProfile";
 import { cargarMensajesConversacion, getSocket, cargarMultimediaDeConversacion, cambiarConversacion } from "@/composables/useSocket";
 
 const store = useChatStore();
+const { mensajesInternosPorPeer, conversacionActivaId, internalMessagesRevision } =
+  storeToRefs(store);
 const agenteIdActual = resolveAgentIdFromSources();
-const { sendMessage } = useChatSocket(agenteIdActual);
+const { sendMessage, sendInternalMessage } = useChatSocket(agenteIdActual);
 const { agentProfile, loadAgentProfile } = useAgentProfile();
 
 onMounted(() => {
@@ -127,7 +136,8 @@ const conversations = computed(() => [
 watch(
   conversations,
   async (list) => {
-    if (store.conversacionActivaId || !list.length) return;
+    if (parseInternalPeerId(conversacionActivaId.value)) return;
+    if (conversacionActivaId.value || !list.length) return;
     const primeraId = String(list[0].id || "").trim();
     if (!primeraId) return;
     store.selectConversation(primeraId);
@@ -147,9 +157,26 @@ const conversationsFiltradas = computed(() => {
   });
 });
 
-const selectedConversationId = computed(() => store.conversacionActivaId);
+const selectedConversationId = computed(() => conversacionActivaId.value);
+
+const activeInternalPeerId = computed(() =>
+  parseInternalPeerId(conversacionActivaId.value),
+);
 
 const currentConversation = computed(() => {
+  const peerId = activeInternalPeerId.value;
+  if (peerId) {
+    return {
+      id: buildInternalConvId(peerId),
+      name: `Agente ${peerId}`,
+      nombre: `Agente ${peerId}`,
+      estado: "abierta",
+      isInternal: true,
+      peerAgentId: peerId,
+      online: true,
+    };
+  }
+
   const conv = store.conversacionActiva;
   if (!conv) return null;
   const estado = String(
@@ -165,8 +192,13 @@ const currentConversation = computed(() => {
 });
 
 const currentMessages = computed(() => {
+  void internalMessagesRevision.value;
   const q = busquedaMensaje.value.trim().toLowerCase();
-  const mensajes = store.mensajesActivos.map((m) => ({
+  const peerId = activeInternalPeerId.value;
+  const source = peerId
+    ? mensajesInternosPorPeer.value[peerId] || []
+    : store.mensajesActivos;
+  const mensajes = source.map((m) => ({
     ...m,
     from: m.emisor === "agente" || m.emisor === "agent" ? "agent" : "contact",
   }));
@@ -273,15 +305,28 @@ const agenteActual = computed(() => {
 });
 
 const onSelectConversation = async (id) => {
-  const anterior = store.conversacionActivaId;
+  const anterior = conversacionActivaId.value;
   const nextId = String(id || "").trim();
   if (!nextId) return;
 
+  const peerId = parseInternalPeerId(nextId);
   store.selectConversation(nextId);
   busquedaMensaje.value = "";
 
+  if (peerId) {
+    openInternalChat(peerId, agenteIdActual, (res) => {
+      if (res?.ok && Array.isArray(res.mensajes)) {
+        store.mergeInternalMessages(
+          peerId,
+          mapInternalMessagesForUi(res.mensajes, agenteIdActual),
+        );
+      }
+    });
+    return;
+  }
+
   const flushPromise =
-    anterior && String(anterior) !== nextId
+    anterior && String(anterior) !== nextId && !parseInternalPeerId(anterior)
       ? cambiarConversacion(anterior, nextId)
       : cambiarConversacion(null, nextId);
   flushPromise.catch(() => {});
@@ -290,8 +335,13 @@ const onSelectConversation = async (id) => {
 };
 
 const onSendMessage = (text) => {
-  if (!text || !store.conversacionActivaId) return;
-  sendMessage(store.conversacionActivaId, text);
+  if (!text || !conversacionActivaId.value) return;
+  const peerId = activeInternalPeerId.value;
+  if (peerId) {
+    sendInternalMessage(peerId, text);
+    return;
+  }
+  sendMessage(conversacionActivaId.value, text);
 };
 
 const onUpdateSearchTerm = (value) => {

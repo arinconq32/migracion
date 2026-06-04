@@ -1,14 +1,6 @@
-const fs = require("fs");
-const path = require("path");
-const multer = require("multer");
-
 const chatUtils = require("../utils/chatUtils");
-
-const AUDIO_DIR = path.resolve(__dirname, "../../storage/chat-files/audio");
-
-if (!fs.existsSync(AUDIO_DIR)) {
-  fs.mkdirSync(AUDIO_DIR, { recursive: true });
-}
+const { uploadAudioSingle } = require("../middleware/chatUpload.middleware");
+const { uploadChatMedia } = require("../services/supabaseStorage.service");
 
 let runtimeService = null;
 
@@ -16,28 +8,7 @@ function setAudioRuntimeService(service) {
   runtimeService = service;
 }
 
-function buildPublicUrl(req, relativePath) {
-  const host = req.get("host") || `localhost:${process.env.SOCKET_PORT || 3001}`;
-  const protocol = req.protocol === "https" ? "https" : "http";
-  return `${protocol}://${host}/storage/chat-files/${relativePath}`;
-}
-
-const storage = multer.diskStorage({
-  destination: (_req, _file, cb) => {
-    cb(null, AUDIO_DIR);
-  },
-  filename: (_req, file, cb) => {
-    const ext = path.extname(file.originalname || "") || ".webm";
-    cb(null, `audio_${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`);
-  },
-});
-
-const upload = multer({
-  storage,
-  limits: { fileSize: 25 * 1024 * 1024 },
-});
-
-const audioUploadMiddleware = upload.single("audio");
+const audioUploadMiddleware = uploadAudioSingle;
 
 async function uploadChatAudio(req, res) {
   try {
@@ -70,8 +41,7 @@ async function uploadChatAudio(req, res) {
       });
     }
 
-    const relativePath = `audio/${path.basename(req.file.filename)}`;
-    const publicUrl = buildPublicUrl(req, relativePath);
+    const { archivo_url: publicUrl } = await uploadChatMedia(req.file, { convId });
     const convIdNumerico = Number.parseInt(convId, 10);
 
     let messageId = null;
@@ -151,14 +121,15 @@ async function uploadChatAudio(req, res) {
       ok: true,
       message: "Archivo enviado correctamente.",
       archivo_url: publicUrl,
-      filename: req.file.originalname || path.basename(req.file.filename),
+      filename: req.file.originalname || "audio.webm",
       tipo: "audio",
+      provider: "supabase",
     });
   } catch (error) {
     console.error("Error al subir audio:", error);
     return res.status(500).json({
       success: false,
-      message: "Error interno al subir audio.",
+      message: error.message || "Error interno al subir audio.",
     });
   }
 }

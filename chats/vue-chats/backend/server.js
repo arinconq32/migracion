@@ -14,6 +14,7 @@ const uploadRoutes = require("./chatapp/routes/upload.routes");
 const chatController = require("./chatapp/controllers/chat.controller");
 const chatUtils = require("./chatapp/utils/chatUtils");
 const { connectMongo } = require("./chatapp/config/db.mongo");
+const { getSupabaseConfig } = require("./chatapp/config/supabase");
 const redisClient = require("./chatapp/config/redis");
 const { safeKeys, safeDel } = redisClient;
 const ChatModelMongo = require("./chatapp/models/ChatModel.mongo");
@@ -114,9 +115,19 @@ function bootWithModel(model, label) {
   });
 
   server.listen(PORT, () => {
+    const supabase = getSupabaseConfig();
     console.log(`Chat backend escuchando en http://localhost:${PORT}`);
     console.log(`Socket.IO listo (CORS origenes: ${ALLOWED_ORIGINS.join(", ")})`);
     console.log(`Modelo activo: ${label}`);
+    if (supabase.configured) {
+      console.log(
+        `Multimedia: Supabase Storage (bucket=${supabase.bucket}, url=${supabase.url})`,
+      );
+    } else {
+      console.warn(
+        "Multimedia: Supabase NO configurado (SUPABASE_URL + SUPABASE_KEY requeridos)",
+      );
+    }
   });
 }
 

@@ -8,11 +8,25 @@ import {
 import { dedupeConversationsByPhone } from "@/utils/conversationDedup";
 import { extractMessageMediaUrl } from "@/utils/messageMedia";
 
+const INTERNAL_CONV_PREFIX = "internal:";
+
 const normalizeConvId = (value) => {
   if (value === null || value === undefined) return null;
   const id = String(value).trim();
   if (!id || id === "NaN") return null;
   return id;
+};
+
+const isInternalConversationId = (convId) =>
+  String(convId || "")
+    .trim()
+    .startsWith(INTERNAL_CONV_PREFIX);
+
+const parseInternalPeerFromConvId = (convId) => {
+  const raw = String(convId || "").trim();
+  if (!raw.startsWith(INTERNAL_CONV_PREFIX)) return null;
+  const peer = raw.slice(INTERNAL_CONV_PREFIX.length).trim();
+  return peer || null;
 };
 
 const normalizeConversation = (conversation = {}) => {
@@ -172,6 +186,24 @@ export const useChatStore = defineStore("chat", () => {
   const filtrosEtiquetasSeleccionadas = ref([]);
   const motivosCierre = ref([]);
   const tipificaciones = ref([]);
+  const agentesInternos = ref([]);
+  const mensajesInternosPorPeer = ref({});
+  /** Incrementa en cada cambio de mensajes internos para forzar reactividad en la UI. */
+  const internalMessagesRevision = ref(0);
+  const noLeidosInternosPorPeer = ref({});
+  const ultimoInternoPorPeer = ref({});
+  const internoListaVisible = ref(false);
+
+  const totalNoLeidosInternos = computed(() =>
+    Object.values(noLeidosInternosPorPeer.value).reduce(
+      (acc, count) => acc + Number(count || 0),
+      0,
+    ),
+  );
+
+  const tieneNoLeidosInternos = computed(
+    () => totalNoLeidosInternos.value > 0,
+  );
 
   const activos = computed(() => {
     return dedupeConversationsByPhone(
@@ -288,6 +320,7 @@ export const useChatStore = defineStore("chat", () => {
 
     if (
       conversacionActivaId.value &&
+      !isInternalConversationId(conversacionActivaId.value) &&
       !conversaciones.value[conversacionActivaId.value]
     ) {
       conversacionActivaId.value = null;
@@ -308,9 +341,60 @@ export const useChatStore = defineStore("chat", () => {
     conversaciones.value = nextMap;
   };
 
+  const isInternalPeerActivoYVisible = (peerId) => {
+    const key = String(peerId || "").trim();
+    if (!key) return false;
+    const active = parseInternalPeerFromConvId(conversacionActivaId.value);
+    return (
+      internoListaVisible.value &&
+      active &&
+      String(active) === key
+    );
+  };
+
+  const setInternoListaVisible = (visible) => {
+    internoListaVisible.value = Boolean(visible);
+  };
+
+  const markInternalPeerAsRead = (peerId) => {
+    const key = String(peerId || "").trim();
+    if (!key || !noLeidosInternosPorPeer.value[key]) return;
+    const next = { ...noLeidosInternosPorPeer.value };
+    delete next[key];
+    noLeidosInternosPorPeer.value = next;
+  };
+
+  const incrementInternalUnread = (peerId, preview = {}) => {
+    const key = String(peerId || "").trim();
+    if (!key) return;
+    noLeidosInternosPorPeer.value = {
+      ...noLeidosInternosPorPeer.value,
+      [key]: Number(noLeidosInternosPorPeer.value[key] || 0) + 1,
+    };
+    const text = String(preview.text || preview.mensaje || "").trim();
+    if (text) {
+      ultimoInternoPorPeer.value = {
+        ...ultimoInternoPorPeer.value,
+        [key]: {
+          lastMessage: text,
+          lastMessageTime: Number(preview.timestamp) || Date.now(),
+        },
+      };
+    }
+  };
+
   const selectConversation = (convId) => {
     const id = normalizeConvId(convId);
-    if (!id || !conversaciones.value[id]) return;
+    if (!id) return;
+
+    if (isInternalConversationId(id)) {
+      conversacionActivaId.value = id;
+      const peer = parseInternalPeerFromConvId(id);
+      if (peer) markInternalPeerAsRead(peer);
+      return;
+    }
+
+    if (!conversaciones.value[id]) return;
 
     conversacionActivaId.value = id;
     conversaciones.value[id].unread = 0;
@@ -413,6 +497,121 @@ export const useChatStore = defineStore("chat", () => {
     };
   };
 
+  const setAgentesInternos = (list = []) => {
+    agentesInternos.value = Array.isArray(list) ? list : [];
+  };
+
+  const setInternalMessages = (peerId, messages = []) => {
+    const key = String(peerId || "").trim();
+    if (!key) return;
+    mensajesInternosPorPeer.value = {
+      ...mensajesInternosPorPeer.value,
+      [key]: Array.isArray(messages) ? [...messages] : [],
+    };
+    internalMessagesRevision.value += 1;
+  };
+
+  const mergeInternalMessages = (peerId, messages = []) => {
+    const key = String(peerId || "").trim();
+    if (!key) return;
+
+    const incoming = Array.isArray(messages) ? messages : [];
+    const current = Array.isArray(mensajesInternosPorPeer.value[key])
+      ? mensajesInternosPorPeer.value[key]
+      : [];
+    const byId = new Map();
+
+    for (const raw of [...incoming, ...current]) {
+      if (!raw) continue;
+      const id = String(raw.id || "").trim();
+      if (!id) continue;
+      const prev = byId.get(id);
+      const ts = Number(raw.timestamp) || 0;
+      if (!prev || ts >= (Number(prev.timestamp) || 0)) {
+        byId.set(id, { ...raw });
+      }
+    }
+
+    const merged = Array.from(byId.values()).sort(
+      (a, b) => (Number(a.timestamp) || 0) - (Number(b.timestamp) || 0),
+    );
+    mensajesInternosPorPeer.value = {
+      ...mensajesInternosPorPeer.value,
+      [key]: merged,
+    };
+    internalMessagesRevision.value += 1;
+  };
+
+  const addInternalMessage = (peerId, rawMsg = {}, viewerAgentId = "") => {
+    const key = String(peerId || "").trim();
+    if (!key || !rawMsg) return;
+
+    const text = String(rawMsg.text || rawMsg.mensaje || "").trim();
+    const archivoUrl = String(
+      rawMsg.archivo_url || rawMsg.archivoUrl || rawMsg.url || "",
+    ).trim();
+    let tipo = String(rawMsg.tipo || "texto").trim().toLowerCase() || "texto";
+    if (tipo === "image") tipo = "imagen";
+    if (tipo === "document") tipo = "documento";
+    const normalized = {
+      id: String(rawMsg.id || `im_${Date.now()}`),
+      emisor: rawMsg.direction === "out" ? "agente" : "contact",
+      text,
+      mensaje: text,
+      timestamp: Number(rawMsg.timestamp) || Date.now(),
+      tipo,
+      archivo_url: archivoUrl || null,
+      archivoUrl: archivoUrl || null,
+      direction: rawMsg.direction,
+      fromAgentId: rawMsg.fromAgentId,
+      toAgentId: rawMsg.toAgentId,
+    };
+
+    const current = Array.isArray(mensajesInternosPorPeer.value[key])
+      ? mensajesInternosPorPeer.value[key]
+      : [];
+    const exists = current.some(
+      (m) =>
+        String(m.id) === normalized.id ||
+        (String(m.id).startsWith("temp_") &&
+          normalized.direction === "out" &&
+          m.direction === "out" &&
+          (m.text === normalized.text ||
+            (normalized.archivo_url &&
+              m.archivo_url === normalized.archivo_url))),
+    );
+    if (exists) {
+      mensajesInternosPorPeer.value = {
+        ...mensajesInternosPorPeer.value,
+        [key]: current.map((m) =>
+          String(m.id).startsWith("temp_") &&
+          normalized.direction === "out" &&
+          m.direction === "out" &&
+          (m.text === normalized.text ||
+            (normalized.archivo_url &&
+              m.archivo_url === normalized.archivo_url))
+            ? normalized
+            : m,
+        ),
+      };
+      internalMessagesRevision.value += 1;
+      return;
+    }
+
+    mensajesInternosPorPeer.value = {
+      ...mensajesInternosPorPeer.value,
+      [key]: [...current, normalized],
+    };
+    internalMessagesRevision.value += 1;
+
+    if (
+      normalized.emisor === "contact" &&
+      !isInternalPeerActivoYVisible(key)
+    ) {
+      incrementInternalUnread(key, normalized);
+    }
+  };
+
   const resetStore = () => {
     conversaciones.value = {};
     mensajesPorConv.value = {};
@@ -430,6 +629,11 @@ export const useChatStore = defineStore("chat", () => {
     filtrosEtiquetasSeleccionadas.value = [];
     motivosCierre.value = [];
     tipificaciones.value = [];
+    agentesInternos.value = [];
+    mensajesInternosPorPeer.value = {};
+    noLeidosInternosPorPeer.value = {};
+    ultimoInternoPorPeer.value = {};
+    internoListaVisible.value = false;
   };
 
   // ——— Etiquetas ———
@@ -638,6 +842,14 @@ export const useChatStore = defineStore("chat", () => {
     filtrosEtiquetasSeleccionadas,
     motivosCierre,
     tipificaciones,
+    agentesInternos,
+    mensajesInternosPorPeer,
+    internalMessagesRevision,
+    noLeidosInternosPorPeer,
+    ultimoInternoPorPeer,
+    internoListaVisible,
+    totalNoLeidosInternos,
+    tieneNoLeidosInternos,
     etiquetas,
     etiquetasPorConv,
     etiquetasDeConvActiva,
@@ -664,6 +876,13 @@ export const useChatStore = defineStore("chat", () => {
     limpiarFiltrosEtiquetas,
     setMotivosCierre,
     setTipificaciones,
+    setAgentesInternos,
+    setInternalMessages,
+    mergeInternalMessages,
+    addInternalMessage,
+    setInternoListaVisible,
+    markInternalPeerAsRead,
+    incrementInternalUnread,
     resetStore,
   };
 });
