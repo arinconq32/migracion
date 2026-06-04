@@ -25,6 +25,12 @@ import {
 import { useChatStore } from "@/stores/chatStore";
 import { resolveAgentIdFromSources } from "@/utils/agentId";
 import {
+  confirmDelete,
+  confirmSave,
+  showError,
+  showSuccess,
+} from "@/utils/swal";
+import {
   buildInternalConvId,
   parseInternalPeerId,
   sendInternalChatMessage,
@@ -626,7 +632,7 @@ const cerrarEditarContacto = () => {
   editContactModalOpen.value = false;
 };
 
-const guardarEdicionContacto = () => {
+const guardarEdicionContacto = async () => {
   const nombre = String(editContactForm.value.nombre || "").trim();
   const telefono = String(editContactForm.value.telefono || "").trim();
 
@@ -634,6 +640,9 @@ const guardarEdicionContacto = () => {
     editContactFeedback.value = "Nombre y telefono son requeridos.";
     return;
   }
+
+  const confirmed = await confirmSave();
+  if (!confirmed) return;
 
   editContactSubmitting.value = true;
   editContactFeedback.value = "Guardando...";
@@ -650,15 +659,42 @@ const guardarEdicionContacto = () => {
       entidad: String(editContactForm.value.entidad || "").trim(),
       convId: props.conversation?.id,
     },
-    (res) => {
+    async (res) => {
       editContactSubmitting.value = false;
-      if (res?.ok === false || res?.error) {
+      if (res?.ok === false || res?.error || res?.success === false) {
         editContactFeedback.value =
-          res?.message || res?.error || "Error al guardar.";
+          res?.message || res?.mensaje || res?.error || "Error al guardar.";
         return;
+      }
+      const convId = String(props.conversation?.id || "").trim();
+      if (convId) {
+        store.upsertConversation({
+          ...props.conversation,
+          id: convId,
+          nombre,
+          name: nombre,
+          telefono,
+          email: String(editContactForm.value.email || "").trim(),
+          ciudad: String(editContactForm.value.ciudad || "").trim(),
+          direccion: String(editContactForm.value.direccion || "").trim(),
+          entidad: String(editContactForm.value.entidad || "").trim(),
+          data: String(editContactForm.value.dni || "").trim(),
+          metadata: {
+            ...(props.conversation?.metadata || {}),
+            nombre,
+            telefono,
+            email: String(editContactForm.value.email || "").trim(),
+            ciudad: String(editContactForm.value.ciudad || "").trim(),
+            direccion: String(editContactForm.value.direccion || "").trim(),
+            entidad: String(editContactForm.value.entidad || "").trim(),
+            dni: String(editContactForm.value.dni || "").trim(),
+            data: String(editContactForm.value.dni || "").trim(),
+          },
+        });
       }
       editContactFeedback.value = "";
       editContactModalOpen.value = false;
+      await showSuccess("Contacto actualizado correctamente.");
     },
   );
 };
@@ -877,14 +913,23 @@ const volverAInfo = () => {
   contactSidebarMode.value = "info";
 };
 
-const eliminarContacto = () => {
+const eliminarContacto = async () => {
   if (!props.conversation) return;
-  if (!window.confirm("¿Seguro que deseas eliminar este contacto?")) return;
-  emitSocket("eliminarContacto", { convId: props.conversation.id }, (res) => {
-    if (res?.ok !== false) {
-      store.markConversationClosed(props.conversation.id);
-      cerrarPerfilContacto();
+
+  const confirmed = await confirmDelete();
+  if (!confirmed) return;
+
+  const convId = String(props.conversation.id || "").trim();
+  emitSocket("eliminarContacto", { convId }, async (res) => {
+    if (res?.ok === false || res?.success === false) {
+      await showError(
+        res?.message || res?.error || "No se pudo eliminar el contacto.",
+      );
+      return;
     }
+    store.removeConversation(convId);
+    cerrarPerfilContacto();
+    await showSuccess("Contacto eliminado correctamente.");
   });
 };
 

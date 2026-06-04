@@ -152,13 +152,18 @@ export function registrarListenersSocket(handlers = {}) {
 
   // Chat message
   socket.value.on('chat_message', ({ convId, msg }) => {
-    console.log(`Mensaje recibido en conversación ${convId}`);
-    handlers.onChatMessage?.({ convId, msg });
+    const id = String(convId ?? msg?.conversacion_id ?? msg?.conversacionId ?? "").trim();
+    console.log(`Mensaje recibido en conversación ${id}`);
+    handlers.onChatMessage?.({ convId: id, msg });
   });
 
   // Estado de conversaciones
   socket.value.on('update_queues', (data) => {
     handlers.onUpdateQueues?.(data);
+  });
+
+  socket.value.on('init_state', (data) => {
+    handlers.onInitState?.(data);
   });
 
   // Conversación asignada

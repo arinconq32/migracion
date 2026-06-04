@@ -15,7 +15,7 @@ import {
   mapInternalMessagesForUi,
 } from "@/composables/useInternalChatSocket";
 import { useAgentProfile } from "@/composables/useAgentProfile";
-import { cargarMensajesConversacion, getSocket, cargarMultimediaDeConversacion, cambiarConversacion } from "@/composables/useSocket";
+import { cargarMensajesConversacion, getSocket, cargarMultimediaDeConversacion, cambiarConversacion, abrirChat } from "@/composables/useSocket";
 
 const store = useChatStore();
 const { mensajesInternosPorPeer, conversacionActivaId, internalMessagesRevision } =
@@ -310,10 +310,10 @@ const onSelectConversation = async (id) => {
   if (!nextId) return;
 
   const peerId = parseInternalPeerId(nextId);
-  store.selectConversation(nextId);
   busquedaMensaje.value = "";
 
   if (peerId) {
+    store.selectConversation(nextId);
     openInternalChat(peerId, agenteIdActual, (res) => {
       if (res?.ok && Array.isArray(res.mensajes)) {
         store.mergeInternalMessages(
@@ -325,11 +325,43 @@ const onSelectConversation = async (id) => {
     return;
   }
 
-  const flushPromise =
-    anterior && String(anterior) !== nextId && !parseInternalPeerId(anterior)
-      ? cambiarConversacion(anterior, nextId)
-      : cambiarConversacion(null, nextId);
-  flushPromise.catch(() => {});
+  const conv =
+    store.conversaciones[nextId] ||
+    store.activos.find((c) => String(c.id) === nextId) ||
+    store.nuevos.find((c) => String(c.id) === nextId) ||
+    store.cerrados.find((c) => String(c.id) === nextId);
+
+  const estado = String(conv?.estado || "abierta").toLowerCase();
+  store.selectConversation(nextId);
+
+  try {
+    if (estado === "nuevo") {
+      const resp = await abrirChat(nextId, agenteIdActual);
+      const failed =
+        resp?.success === false ||
+        resp?.ok === false ||
+        Boolean(resp?.error);
+      if (failed) {
+        console.error("No se pudo abrir la conversación:", resp?.error || resp);
+      } else {
+        store.upsertConversation({
+          ...(conv || {}),
+          id: nextId,
+          estado: "abierta",
+        });
+      }
+    } else if (estado === "abierta") {
+      if (anterior && String(anterior) !== nextId && !parseInternalPeerId(anterior)) {
+        await cambiarConversacion(anterior, nextId);
+      } else {
+        await cambiarConversacion(null, nextId);
+      }
+    } else if (estado === "cerrada") {
+      await cambiarConversacion(anterior, nextId);
+    }
+  } catch (error) {
+    console.error("Error al preparar conversación:", error);
+  }
 
   await cargarMensajesDeConversacion(nextId, true);
 };

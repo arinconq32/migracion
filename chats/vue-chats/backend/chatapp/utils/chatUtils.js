@@ -9,15 +9,29 @@ const setInstances = (io, chatModel) => {
 const getSocketUserId = (socket) =>
   socket?.data?.userId || socket?.data?.exten || null;
 
+const {
+  dedupeConversationsByPhone,
+} = require("../utils/conversationDedup");
+
 const getState = async (userId) => {
   if (!chatModelInstance) {
     console.error("Error: chatModelInstance not set in chatUtils.");
     return { activos: [], nuevos: [], cerrados: [] };
   }
 
-  const activos = await chatModelInstance.getConversaciones(userId, "abierta");
-  const cerrados = await chatModelInstance.getConversaciones(userId, "cerrada");
-  const nuevos = await chatModelInstance.getPendientes();
+  const activosRaw = await chatModelInstance.getConversaciones(userId, "abierta");
+  const cerradosRaw = await chatModelInstance.getConversaciones(userId, "cerrada");
+  const nuevosRaw = await chatModelInstance.getPendientes();
+
+  const deduped = dedupeConversationsByPhone([
+    ...activosRaw,
+    ...cerradosRaw,
+    ...nuevosRaw,
+  ]);
+
+  const activos = deduped.filter((c) => c.estado === "abierta");
+  const nuevos = deduped.filter((c) => c.estado === "nuevo");
+  const cerrados = deduped.filter((c) => c.estado === "cerrada");
 
   console.log(`🔍 getState para usuario ${userId}:`);
   console.log(
@@ -30,7 +44,7 @@ const getState = async (userId) => {
     `   - Nuevos: ${nuevos.length} → IDs: [${nuevos.map((conversation) => conversation.id).join(",")}]`,
   );
 
-  for (const conversation of [...activos, ...cerrados, ...nuevos]) {
+  for (const conversation of deduped) {
     conversation.messages = await chatModelInstance.getMensajes(
       conversation.id,
     );

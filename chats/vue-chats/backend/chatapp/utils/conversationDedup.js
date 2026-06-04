@@ -7,9 +7,9 @@ function normalizePhoneDigits(value) {
 function conversationPhoneKey(conv = {}) {
   const raw =
     conv.telefono ||
+    conv.tels ||
     conv.contactoId ||
     conv.contacto_id ||
-    conv.tels ||
     conv.data ||
     "";
   const digits = normalizePhoneDigits(raw);
@@ -18,11 +18,32 @@ function conversationPhoneKey(conv = {}) {
   return digits;
 }
 
-function conversationNumericId(conv = {}) {
-  const id = conv.id ?? conv.legacyId ?? conv._id;
-  const numeric = Number(id);
+function conversationRecencyScore(conv = {}) {
+  const legacy = conv.legacyId ?? conv.id ?? conv._id;
+  const numeric = Number(legacy);
   if (Number.isFinite(numeric) && numeric > 0) return numeric;
-  return String(id || "").trim();
+
+  const idStr = String(conv._id || conv.id || "").trim();
+  if (/^[a-f0-9]{24}$/i.test(idStr)) {
+    return parseInt(idStr.substring(0, 8), 16);
+  }
+
+  const ts = new Date(
+    conv.ultima_actividad || conv.ultimaActividad || conv.inicio || 0,
+  ).getTime();
+  if (Number.isFinite(ts) && ts > 0) return ts;
+
+  return 0;
+}
+
+function isConversationNewer(next, prev) {
+  const nextScore = conversationRecencyScore(next);
+  const prevScore = conversationRecencyScore(prev);
+  if (nextScore !== prevScore) return nextScore > prevScore;
+
+  const nextId = String(next.id ?? next._id ?? "");
+  const prevId = String(prev.id ?? prev._id ?? "");
+  return nextId > prevId;
 }
 
 function dedupeConversationsByPhone(conversations = []) {
@@ -33,19 +54,7 @@ function dedupeConversationsByPhone(conversations = []) {
     const key = phoneKey ? `phone:${phoneKey}` : `id:${conv.id ?? conv._id}`;
     const existing = map.get(key);
 
-    if (!existing) {
-      map.set(key, conv);
-      continue;
-    }
-
-    const nextId = conversationNumericId(conv);
-    const prevId = conversationNumericId(existing);
-    const nextIsHigher =
-      typeof nextId === "number" && typeof prevId === "number"
-        ? nextId > prevId
-        : String(nextId) > String(prevId);
-
-    if (nextIsHigher) {
+    if (!existing || isConversationNewer(conv, existing)) {
       map.set(key, conv);
     }
   }
@@ -54,23 +63,13 @@ function dedupeConversationsByPhone(conversations = []) {
 }
 
 function dedupeConversationsByPhonePerEstado(conversations = []) {
-  const byEstado = new Map();
-
-  for (const conv of conversations) {
-    const estado = String(conv.estado || "nuevo").toLowerCase().trim();
-    if (!byEstado.has(estado)) byEstado.set(estado, []);
-    byEstado.get(estado).push(conv);
-  }
-
-  const result = [];
-  for (const group of byEstado.values()) {
-    result.push(...dedupeConversationsByPhone(group));
-  }
-  return result;
+  return dedupeConversationsByPhone(conversations);
 }
 
 module.exports = {
   conversationPhoneKey,
+  conversationRecencyScore,
+  isConversationNewer,
   dedupeConversationsByPhone,
   dedupeConversationsByPhonePerEstado,
 };

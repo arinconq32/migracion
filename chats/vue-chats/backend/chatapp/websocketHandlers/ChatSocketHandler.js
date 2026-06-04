@@ -116,43 +116,58 @@ class ChatSocketHandler {
     socket.on("open_chat", async ({ convId, userId }, callback) => {
       try {
         const uid = String(userId || socket.data.userId || "");
-        if (!uid) {
+        const convIdStr = String(convId || "").trim();
+        if (!uid || !convIdStr) {
           const errPayload = {
             success: false,
-            error: "userId no disponible para abrir chat",
+            error: "userId o convId no disponible para abrir chat",
           };
           socket.emit("error_msg", errPayload.error);
           if (typeof callback === "function") callback(errPayload);
           return;
         }
 
-        const activeCount = await this.chatModel.countActiveConversations(uid);
-        if (activeCount >= this.MAX_ACTIVE) {
-          const errPayload = {
-            success: false,
-            error: `Máximo de ${this.MAX_ACTIVE} chats activos alcanzado`,
-            count: activeCount,
-            max: this.MAX_ACTIVE,
-          };
-          socket.emit("error_msg", errPayload.error);
-          if (typeof callback === "function") callback(errPayload);
-          return;
+        const conv = await this.chatModel.findConversationByAnyId(convIdStr);
+        const convAgent = String(conv?.agenteId || conv?.agente_id || "").trim();
+        const convEstado = String(conv?.estado || "").toLowerCase();
+        const alreadyOpenForAgent =
+          convEstado === "abierta" && convAgent && convAgent === uid;
+
+        if (!alreadyOpenForAgent) {
+          const activeCount = await this.chatModel.countActiveConversations(uid);
+          if (activeCount >= this.MAX_ACTIVE) {
+            const errPayload = {
+              success: false,
+              error: `Máximo de ${this.MAX_ACTIVE} chats activos alcanzado`,
+              count: activeCount,
+              max: this.MAX_ACTIVE,
+            };
+            socket.emit("error_msg", errPayload.error);
+            if (typeof callback === "function") callback(errPayload);
+            return;
+          }
+
+          await this.chatModel.updateConversationState(
+            convIdStr,
+            "abierta",
+            uid,
+            true,
+          );
         }
 
-        await this.chatModel.updateConversationState(
-          convId,
-          "abierta",
-          uid,
-          true,
-        );
-        socket.join(String(convId));
-        socket.data.currentConvId = String(convId);
+        const previousConvId = String(socket.data.currentConvId || "").trim();
+        if (previousConvId && previousConvId !== convIdStr) {
+          socket.leave(previousConvId);
+        }
+
+        socket.join(convIdStr);
+        socket.data.currentConvId = convIdStr;
 
         await this.chatUtils.broadcast();
         await this.emitActiveConversationsCountForUser(uid);
 
         if (typeof callback === "function") {
-          callback({ success: true, convId, estado: "abierta" });
+          callback({ success: true, ok: true, convId: convIdStr, estado: "abierta" });
         }
       } catch (error) {
         const errMessage =
@@ -260,6 +275,8 @@ class ChatSocketHandler {
             anterior = String((await messageBuffer.getActiveConversation(userId)) || "");
           }
 
+          const nuevo = String(convIdNuevo || "").trim();
+
           let result = { persisted: 0, ids: [], convId: anterior || null };
           if (
             anterior &&
@@ -273,8 +290,18 @@ class ChatSocketHandler {
             }
           }
 
-          if (convIdNuevo && userId) {
-            await messageBuffer.setActiveConversation(userId, convIdNuevo);
+          if (anterior && anterior !== nuevo) {
+            socket.leave(anterior);
+          }
+
+          if (nuevo) {
+            socket.join(nuevo);
+            socket.data.currentConvId = nuevo;
+            if (userId) {
+              await messageBuffer.setActiveConversation(userId, nuevo);
+            }
+          } else {
+            socket.data.currentConvId = null;
           }
 
           if (typeof callback === "function") {
@@ -616,6 +643,83 @@ class ChatSocketHandler {
           salaId: payload.salaId,
           mensaje: response.error || "No se pudo finalizar la conversación",
         });
+      }
+    });
+
+    socket.on("editarContacto", async (payload = {}, callback) => {
+      try {
+        if (typeof this.chatModel.editarContacto !== "function") {
+          const err = "Operación no disponible en el modelo de chat";
+          if (typeof callback === "function") callback({ ok: false, error: err });
+          return;
+        }
+        const result = await this.chatModel.editarContacto(payload);
+        if (result?.success || result?.ok) {
+          await this.chatUtils.broadcast();
+        }
+        if (typeof callback === "function") {
+          callback(result?.ok === false ? result : { ok: true, ...result });
+        }
+      } catch (error) {
+        console.error("Error en editarContacto:", error.message);
+        if (typeof callback === "function") {
+          callback({ ok: false, error: error.message, message: error.message });
+        }
+      }
+    });
+
+    socket.on("eliminarContacto", async (payload = {}, callback) => {
+      try {
+        if (typeof this.chatModel.eliminarContacto !== "function") {
+          const err = "Operación no disponible en el modelo de chat";
+          if (typeof callback === "function") callback({ ok: false, error: err });
+          return;
+        }
+        const convId = payload?.convId || payload?.id;
+        const result = await this.chatModel.eliminarContacto({
+          ...payload,
+          convId,
+        });
+        if (result?.success || result?.ok) {
+          await this.chatUtils.broadcast();
+        }
+        if (typeof callback === "function") {
+          callback(result?.success || result?.ok ? { ok: true, ...result } : result);
+        }
+      } catch (error) {
+        console.error("Error en eliminarContacto:", error.message);
+        if (typeof callback === "function") {
+          callback({ ok: false, error: error.message, message: error.message });
+        }
+      }
+    });
+
+    socket.on("crearContacto", async (payload = {}, callback) => {
+      try {
+        if (typeof this.chatModel.crearContacto !== "function") {
+          const err = "Operación no disponible en el modelo de chat";
+          if (typeof callback === "function") callback({ ok: false, error: err });
+          return;
+        }
+        const agentId = String(
+          payload?.agentId ||
+            payload?.agenteId ||
+            socket.data.userId ||
+            socket.handshake.query.userId ||
+            "",
+        ).trim();
+        const result = await this.chatModel.crearContacto({ ...payload, agentId });
+        if (result?.success || result?.ok) {
+          await this.chatUtils.broadcast();
+        }
+        if (typeof callback === "function") {
+          callback(result?.ok === false ? result : { ok: true, ...result });
+        }
+      } catch (error) {
+        console.error("Error en crearContacto:", error.message);
+        if (typeof callback === "function") {
+          callback({ ok: false, error: error.message, message: error.message });
+        }
       }
     });
 

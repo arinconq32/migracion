@@ -1,6 +1,6 @@
 const Conversation = require("./Conversation.mongo");
 const Message = require("./Message.mongo");
-const { fetchMessagesForConversation } = require("../utils/messageQuery");
+const { fetchMessagesForConversation, buildMessageFilters } = require("../utils/messageQuery");
 const MotivoCierre = require("./MotivoCierre");
 const Etiqueta = require("./Etiqueta");
 const Filtro = require("./Filtro");
@@ -10,6 +10,7 @@ const { safeGet, safeSet, safeDel } = redisClient;
 const mongoose = require("mongoose");
 const {
   dedupeConversationsByPhone,
+  isConversationNewer,
 } = require("../utils/conversationDedup");
 const { extractMessageMediaUrl: extractMediaUrlBackend } = require("../utils/messageMedia");
 const messageBuffer = require("../services/messageBuffer.service");
@@ -74,11 +75,18 @@ class ChatModelMongo {
   }
 
   normalizeConversation(item = {}) {
+    const telefono = String(item.telefono || item.tels || "").trim();
+    const nombre = String(
+      item.nombre || item.nombreContacto || item.name || "",
+    ).trim();
     return {
       id: item.id ?? String(item._id || ""),
       _id: item._id,
       legacyId: item.legacyId ?? null,
-      telefono: item.telefono,
+      telefono,
+      tels: telefono,
+      nombre,
+      name: nombre,
       contactoId: item.contactoId || item.contacto_id,
       agenteId: item.agenteId || item.agente_id,
       estado: item.estado,
@@ -858,14 +866,145 @@ class ChatModelMongo {
 
     return msg.id ?? msg.legacyId ?? String(msg._id);
   }
+  buildAgentIdFilter(agenteId) {
+    const uid = String(agenteId || "").trim();
+    if (!uid) return null;
+    const numeric = Number(uid);
+    if (Number.isFinite(numeric)) {
+      return { $in: [uid, numeric, String(numeric)] };
+    }
+    return uid;
+  }
+
+  createConversationIdentity() {
+    const oid = new mongoose.Types.ObjectId();
+    const idStr = String(oid);
+    return { _id: oid, id: idStr, legacyId: idStr };
+  }
+
+  async getLatestConversationByPhone(phone) {
+    const db = mongoose.connection.db;
+    const filters = [];
+    for (const variant of this.phoneHistoryVariants(phone)) {
+      filters.push({ telefono: variant }, { tels: variant });
+    }
+    if (!filters.length) return null;
+
+    const docs = await db.collection("conversaciones").find({ $or: filters }).toArray();
+    if (!docs.length) return null;
+
+    return docs.reduce((best, current) =>
+      isConversationNewer(current, best) ? current : best,
+    );
+  }
+
+  async getOpenConversationByPhone(phone) {
+    const db = mongoose.connection.db;
+    const filters = [];
+    for (const variant of this.phoneHistoryVariants(phone)) {
+      filters.push({ telefono: variant }, { tels: variant });
+    }
+    if (!filters.length) return null;
+
+    return db.collection("conversaciones").findOne(
+      {
+        $or: filters,
+        estado: { $in: ["abierta", "nuevo", "pendiente"] },
+      },
+      { sort: { inicio: -1, _id: -1 } },
+    );
+  }
+
+  async upsertConversationForClient({
+    telefono,
+    nombre = "Desconocido",
+    cola = null,
+    agenteId = null,
+    salaId = null,
+    estado = null,
+    contactoId = null,
+    origen = "whatsapp",
+  }) {
+    const db = mongoose.connection.db;
+    const col = db.collection("conversaciones");
+    const phone = String(telefono || "").trim();
+    const normalizedAgent = agenteId ? String(agenteId).trim() : null;
+    const dataContacto = String(contactoId || phone).trim();
+    const now = new Date();
+
+    let targetState = estado || (normalizedAgent ? "abierta" : "nuevo");
+    if (normalizedAgent && targetState === "abierta") {
+      const active = await this.countActiveConversations(normalizedAgent);
+      const maxActive = Number(process.env.MAX_ACTIVE_CONVERSATIONS || 3);
+      if (active >= maxActive) targetState = "nuevo";
+    }
+
+    const existing = await this.getLatestConversationByPhone(phone);
+
+    if (existing?._id) {
+      const update = {
+        telefono: phone,
+        tels: phone,
+        nombre: nombre || existing.nombre || existing.nombreContacto,
+        nombreContacto: nombre || existing.nombreContacto,
+        contactoId: dataContacto,
+        contacto_id: dataContacto,
+        ultima_actividad: now,
+        origen: origen || existing.origen || "whatsapp",
+      };
+      if (cola) update.cola = cola;
+      if (salaId) update.salaId = salaId;
+      if (normalizedAgent) {
+        update.agenteId = normalizedAgent;
+        update.agente_id = normalizedAgent;
+        update.estado = targetState;
+      }
+      await col.updateOne({ _id: existing._id }, { $set: update });
+      if (normalizedAgent) await safeDel(`conversaciones:${normalizedAgent}`);
+      const refreshed = await col.findOne({ _id: existing._id });
+      return this.normalizeConversation(refreshed);
+    }
+
+    const identity = this.createConversationIdentity();
+    const insert = {
+      _id: identity._id,
+      id: identity.id,
+      legacyId: identity.legacyId,
+      telefono: phone,
+      tels: phone,
+      contactoId: dataContacto,
+      contacto_id: dataContacto,
+      nombre,
+      nombreContacto: nombre,
+      agenteId: normalizedAgent,
+      agente_id: normalizedAgent,
+      estado: targetState,
+      estadoConexion: "ausente",
+      marca: "normal",
+      origen: origen || "whatsapp",
+      inicio: now,
+      ultima_actividad: now,
+      cola: cola || null,
+      salaId: salaId || null,
+      observaciones: "observacion",
+      etiqueta2: "etiqueta2",
+    };
+
+    const result = await col.insertOne(insert);
+    if (normalizedAgent) await safeDel(`conversaciones:${normalizedAgent}`);
+    return this.normalizeConversation({ _id: result.insertedId, ...insert });
+  }
+
   // backend/chatapp/models/ChatModel.mongo.js
   // Obtener solo las conversaciones del agente
   async getConversaciones(agenteId, estado) {
-    const conversations = await require("./Conversation.mongo")
-      .find({
-        agenteId,
-        estado,
-      })
+    const agenteFilter = this.buildAgentIdFilter(agenteId);
+    if (!agenteFilter) return [];
+
+    const conversations = await Conversation.find({
+      $or: [{ agenteId: agenteFilter }, { agente_id: agenteFilter }],
+      estado,
+    })
       .sort({ inicio: -1 })
       .lean();
 
@@ -1041,6 +1180,380 @@ class ChatModelMongo {
     );
 
     return String(result.insertedId);
+  }
+
+  buildContactLookupFilters(conv = {}, fallback = {}) {
+    const filters = [];
+    const seen = new Set();
+    const add = (filter) => {
+      const key = JSON.stringify(filter);
+      if (seen.has(key)) return;
+      seen.add(key);
+      filters.push(filter);
+    };
+
+    const contactoId = String(
+      conv?.contactoId ||
+        conv?.contacto_id ||
+        conv?.data ||
+        fallback.identificacion ||
+        fallback.data ||
+        "",
+    ).trim();
+    const telefono = String(
+      conv?.telefono || conv?.tels || fallback.telefono || "",
+    ).trim();
+
+    if (contactoId) {
+      add({ data: contactoId });
+      add({ dni: contactoId });
+      add({ documento: contactoId });
+      if (mongoose.Types.ObjectId.isValid(contactoId)) {
+        add({ _id: new mongoose.Types.ObjectId(contactoId) });
+      }
+    }
+
+    for (const variant of this.phoneHistoryVariants(telefono)) {
+      add({ tels: variant });
+      add({ telefono: variant });
+      add({ data: variant });
+    }
+
+    return filters;
+  }
+
+  buildConvIdFilters(convId, conv = null) {
+    const filters = this.buildConversationLookupFilters(convId);
+    if (conv?._id) {
+      filters.push({ idConv: conv._id }, { idConv: String(conv._id) });
+      const legacy = conv.legacyId ?? conv.id;
+      if (legacy != null && legacy !== "") {
+        filters.push(
+          { idConv: legacy },
+          { idConv: String(legacy) },
+          { idConv: Number(legacy) },
+        );
+      }
+    }
+    return filters;
+  }
+
+  async editarContacto(payload = {}) {
+    const nombre = String(payload.nombre || "").trim();
+    const telefono = String(payload.telefono || "").trim();
+    const identificacion = String(
+      payload.identificacion || payload.dni || payload.data || telefono,
+    ).trim();
+    const email = String(payload.email || "").trim();
+    const ciudad = String(payload.ciudad || "").trim();
+    const direccion = String(payload.direccion || "").trim();
+    const entidad = String(payload.entidad || "").trim();
+    const convId = String(payload.convId || payload.idConv || "").trim();
+
+    if (!nombre || !telefono) {
+      return {
+        success: false,
+        ok: false,
+        mensaje: "Nombre y teléfono son campos requeridos",
+      };
+    }
+
+    const db = mongoose.connection.db;
+    const conv = convId ? await this.findConversationByAnyId(convId) : null;
+    const contactFilters = this.buildContactLookupFilters(conv || {}, {
+      identificacion,
+      telefono,
+    });
+
+    const update = {
+      nombre,
+      tels: telefono,
+      telefono,
+      dni: identificacion,
+      data: identificacion,
+      email,
+      ciudad,
+      direccion,
+      entidad,
+      actualizadoEn: new Date(),
+    };
+
+    let contact = contactFilters.length
+      ? await db.collection("contactos").findOne({ $or: contactFilters })
+      : null;
+
+    if (contact?._id) {
+      await db
+        .collection("contactos")
+        .updateOne({ _id: contact._id }, { $set: update });
+    } else {
+      const insert = { ...update, creadoEn: new Date(), activo: true };
+      const result = await db.collection("contactos").insertOne(insert);
+      contact = { _id: result.insertedId, ...insert };
+    }
+
+    if (conv?._id) {
+      await db.collection("conversaciones").updateOne(
+        { _id: conv._id },
+        {
+          $set: {
+            telefono,
+            tels: telefono,
+            contactoId: identificacion,
+            contacto_id: identificacion,
+            data: identificacion,
+            nombre,
+            nombreContacto: nombre,
+            email,
+            ciudad,
+            direccion,
+            entidad,
+          },
+        },
+      );
+      await safeDel(`mensajes:${convId}`);
+      const agentKey = String(conv.agenteId || conv.agente_id || "").trim();
+      if (agentKey) await safeDel(`conversaciones:${agentKey}`);
+    }
+
+    const refreshed = await db
+      .collection("contactos")
+      .findOne({ _id: contact._id });
+
+    return {
+      success: true,
+      ok: true,
+      mensaje: "Contacto actualizado correctamente",
+      contacto: refreshed,
+    };
+  }
+
+  async insertContacto(nombre, telefono) {
+    const db = mongoose.connection.db;
+    const phone = String(telefono || "").trim();
+    const nombreNorm = String(nombre || "").trim() || "Desconocido";
+    if (!phone) return phone;
+
+    const phoneFilters = [];
+    for (const variant of this.phoneHistoryVariants(phone)) {
+      phoneFilters.push({ tels: variant }, { telefono: variant }, { data: variant });
+    }
+
+    const existing = phoneFilters.length
+      ? await db.collection("contactos").findOne({ $or: phoneFilters })
+      : null;
+
+    if (existing?._id) {
+      const nombreActual = String(existing.nombre || "").trim();
+      if (
+        nombreNorm &&
+        nombreNorm !== "Desconocido" &&
+        (!nombreActual || nombreActual === "Desconocido")
+      ) {
+        await db
+          .collection("contactos")
+          .updateOne({ _id: existing._id }, { $set: { nombre: nombreNorm } });
+      }
+      return String(existing.data || existing.tels || phone);
+    }
+
+    const dataKey = String(phone).replace(/\D/g, "") || phone;
+    await db.collection("contactos").insertOne({
+      nombre: nombreNorm,
+      data: dataKey,
+      dni: dataKey,
+      tels: phone,
+      telefono: phone,
+      creadoEn: new Date(),
+      activo: true,
+    });
+    return dataKey;
+  }
+
+  async crearContacto(payload = {}) {
+    const nombre = String(payload.nombre || "").trim();
+    const telefono = String(payload.telefono || "").trim();
+    const identificacion = String(
+      payload.identificacion || payload.dni || payload.data || telefono,
+    ).trim();
+    const direccion = String(payload.direccion || "").trim();
+    const ciudad = String(payload.ciudad || "").trim();
+    const entidad = String(payload.entidad || "").trim();
+    const email = String(payload.email || "").trim();
+    const convId = String(payload.idConv || payload.convId || "").trim();
+    const agentId = String(
+      payload.agentId || payload.agenteId || payload.userId || "",
+    ).trim();
+
+    if (!nombre || !telefono) {
+      return {
+        success: false,
+        ok: false,
+        mensaje: "Nombre y teléfono son requeridos",
+      };
+    }
+
+    const db = mongoose.connection.db;
+    const duplicateFilters = [];
+    for (const variant of this.phoneHistoryVariants(telefono)) {
+      duplicateFilters.push({ tels: variant }, { telefono: variant });
+    }
+    if (identificacion) {
+      duplicateFilters.push({ data: identificacion }, { dni: identificacion });
+    }
+
+    const existing = duplicateFilters.length
+      ? await db.collection("contactos").findOne({ $or: duplicateFilters })
+      : null;
+
+    const contactUpdate = {
+      nombre,
+      tels: telefono,
+      telefono,
+      data: identificacion,
+      dni: identificacion,
+      direccion,
+      ciudad,
+      entidad,
+      email,
+      actualizadoEn: new Date(),
+      activo: true,
+    };
+
+    let contacto;
+    if (existing?._id) {
+      await db
+        .collection("contactos")
+        .updateOne({ _id: existing._id }, { $set: contactUpdate });
+      contacto = await db.collection("contactos").findOne({ _id: existing._id });
+    } else {
+      const doc = {
+        ...contactUpdate,
+        idConv: convId || null,
+        agenteId: agentId || null,
+        creadoPor: agentId || null,
+        origen: String(payload.origen || "manual").trim(),
+        creadoEn: new Date(),
+      };
+      const result = await db.collection("contactos").insertOne(doc);
+      contacto = { _id: result.insertedId, ...doc };
+    }
+
+    let conversacion = null;
+    if (convId) {
+      const conv = await this.findConversationByAnyId(convId);
+      if (conv?._id) {
+        await db.collection("conversaciones").updateOne(
+          { _id: conv._id },
+          {
+            $set: {
+              contactoId: identificacion,
+              contacto_id: identificacion,
+              telefono,
+              tels: telefono,
+              nombre,
+              nombreContacto: nombre,
+              ...(agentId ? { agenteId, agente_id: agentId } : {}),
+            },
+          },
+        );
+        conversacion = this.normalizeConversation(
+          await db.collection("conversaciones").findOne({ _id: conv._id }),
+        );
+      }
+    }
+
+    if (!conversacion) {
+      conversacion = await this.upsertConversationForClient({
+        telefono,
+        nombre,
+        agenteId: agentId,
+        contactoId: identificacion,
+        cola: entidad || null,
+        origen: String(payload.origen || "manual").trim() || "whatsapp",
+      });
+    }
+
+    if (agentId) await safeDel(`conversaciones:${agentId}`);
+
+    return {
+      success: true,
+      ok: true,
+      mensaje: existing
+        ? "Contacto actualizado y vinculado a conversación"
+        : "Contacto creado correctamente",
+      contacto,
+      conversacion,
+    };
+  }
+
+  async eliminarContacto(data = {}) {
+    try {
+      const convId = String(data.convId || data.id || "").trim();
+      if (!convId) {
+        return { success: false, ok: false, message: "convId requerido" };
+      }
+
+      const db = mongoose.connection.db;
+      const conv = await this.findConversationByAnyId(convId);
+      if (!conv?._id) {
+        return { success: false, ok: false, message: "Conversación no encontrada" };
+      }
+
+      const msgFilters = buildMessageFilters(convId, conv);
+      const msgResult = msgFilters.length
+        ? await db.collection("mensajes").deleteMany({ $or: msgFilters })
+        : { deletedCount: 0 };
+
+      const convCommentFilters = this.buildConvIdFilters(convId, conv);
+      const comResult = convCommentFilters.length
+        ? await db.collection("comentarios_chats").deleteMany({
+            $or: convCommentFilters,
+          })
+        : { deletedCount: 0 };
+
+      const convResult = await db
+        .collection("conversaciones")
+        .deleteOne({ _id: conv._id });
+
+      const contactFilters = this.buildContactLookupFilters(conv, {});
+      const contactResult = contactFilters.length
+        ? await db.collection("contactos").deleteMany({ $or: contactFilters })
+        : { deletedCount: 0 };
+
+      await safeDel(`mensajes:${convId}`);
+      const agentKey = String(conv.agenteId || conv.agente_id || "").trim();
+      if (agentKey) await safeDel(`conversaciones:${agentKey}`);
+
+      if (typeof messageBuffer.clearBufferedMessages === "function") {
+        await messageBuffer.clearBufferedMessages(convId);
+      }
+
+      if (convResult.deletedCount !== 1) {
+        return {
+          success: false,
+          ok: false,
+          step: 2,
+          message: "Error eliminando conversación",
+        };
+      }
+
+      return {
+        success: true,
+        ok: true,
+        deletedMessages: msgResult.deletedCount || 0,
+        deletedConversation: convResult.deletedCount || 0,
+        deletedContact: contactResult.deletedCount || 0,
+        deletedComments: comResult.deletedCount || 0,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        ok: false,
+        step: 0,
+        message: `Error del sistema: ${error.message}`,
+      };
+    }
   }
 }
 

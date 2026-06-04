@@ -5,7 +5,7 @@ import {
   findContactFromLookup,
   resolveConversationDisplayName,
 } from "@/utils/contactDisplay";
-import { dedupeConversationsByPhone } from "@/utils/conversationDedup";
+import { dedupeConversationsByPhone, conversationPhoneKey } from "@/utils/conversationDedup";
 import { extractMessageMediaUrl } from "@/utils/messageMedia";
 
 const INTERNAL_CONV_PREFIX = "internal:";
@@ -206,20 +206,20 @@ export const useChatStore = defineStore("chat", () => {
   );
 
   const activos = computed(() => {
-    return dedupeConversationsByPhone(
-      Object.values(conversaciones.value).filter((c) => c.estado === "abierta"),
+    return dedupeConversationsByPhone(Object.values(conversaciones.value)).filter(
+      (c) => c.estado === "abierta",
     );
   });
 
   const nuevos = computed(() => {
-    return dedupeConversationsByPhone(
-      Object.values(conversaciones.value).filter((c) => c.estado === "nuevo"),
+    return dedupeConversationsByPhone(Object.values(conversaciones.value)).filter(
+      (c) => c.estado === "nuevo",
     );
   });
 
   const cerrados = computed(() => {
-    return dedupeConversationsByPhone(
-      Object.values(conversaciones.value).filter((c) => c.estado === "cerrada"),
+    return dedupeConversationsByPhone(Object.values(conversaciones.value)).filter(
+      (c) => c.estado === "cerrada",
     );
   });
 
@@ -249,6 +249,27 @@ export const useChatStore = defineStore("chat", () => {
     const tags = conv.etiquetas.filter((e) => e && e.nombre);
     if (tags.length > 0) {
       etiquetasPorConv.value[id] = tags;
+    }
+  };
+
+  const removeConversation = (convId) => {
+    const id = normalizeConvId(convId);
+    if (!id) return;
+
+    const next = { ...conversaciones.value };
+    delete next[id];
+    conversaciones.value = next;
+
+    const nextMsgs = { ...mensajesPorConv.value };
+    delete nextMsgs[id];
+    mensajesPorConv.value = nextMsgs;
+
+    const nextTags = { ...etiquetasPorConv.value };
+    delete nextTags[id];
+    etiquetasPorConv.value = nextTags;
+
+    if (conversacionActivaId.value === id) {
+      conversacionActivaId.value = null;
     }
   };
 
@@ -316,7 +337,26 @@ export const useChatStore = defineStore("chat", () => {
     applyQueue(stateNuevos, "nuevo");
     applyQueue(stateCerrados, "cerrada");
 
-    conversaciones.value = nextMap;
+    const winners = dedupeConversationsByPhone(Object.values(nextMap));
+    const prunedMap = {};
+    for (const conv of winners) {
+      if (conv?.id) prunedMap[conv.id] = nextMap[conv.id];
+    }
+    conversaciones.value = prunedMap;
+
+    const activeId = normalizeConvId(conversacionActivaId.value);
+    if (activeId && !prunedMap[activeId]) {
+      const previous = nextMap[activeId];
+      const phoneKey = previous ? conversationPhoneKey(previous) : "";
+      if (phoneKey) {
+        const winner = winners.find(
+          (conv) => conversationPhoneKey(conv) === phoneKey,
+        );
+        if (winner?.id) {
+          conversacionActivaId.value = winner.id;
+        }
+      }
+    }
 
     if (
       conversacionActivaId.value &&
@@ -394,7 +434,9 @@ export const useChatStore = defineStore("chat", () => {
       return;
     }
 
-    if (!conversaciones.value[id]) return;
+    if (!conversaciones.value[id]) {
+      upsertConversation({ id, estado: "nuevo", nombre: "Conversacion" });
+    }
 
     conversacionActivaId.value = id;
     conversaciones.value[id].unread = 0;
@@ -856,6 +898,7 @@ export const useChatStore = defineStore("chat", () => {
     etiquetasDeConv,
     enrichConversationsWithContactLookup,
     upsertConversation,
+    removeConversation,
     setQueueState,
     selectConversation,
     addMessage,

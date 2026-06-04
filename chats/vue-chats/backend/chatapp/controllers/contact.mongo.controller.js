@@ -303,9 +303,6 @@ exports.getContacts = async (req, res) => {
 
     if (agentId) {
       agentContext = await getAgentContactContext(db, agentId);
-      if (!agentContext.phones.size && !agentContext.dataIds.size) {
-        return res.json([]);
-      }
 
       const agentContactFilters = [];
       const dataList = [...agentContext.dataIds];
@@ -319,6 +316,15 @@ exports.getContacts = async (req, res) => {
         agentContactFilters.push(
           { tels: new RegExp(`^${escaped}`) },
           { data: phone },
+        );
+      }
+
+      agentContactFilters.push({ agenteId: agentId }, { creadoPor: agentId });
+      const numericAgent = Number(agentId);
+      if (Number.isFinite(numericAgent)) {
+        agentContactFilters.push(
+          { agenteId: numericAgent },
+          { creadoPor: numericAgent },
         );
       }
 

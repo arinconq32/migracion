@@ -45,6 +45,12 @@ import {
 } from "@/composables/useInternalChatSocket";
 import { getApiBase } from "@/utils/apiBase";
 import {
+  confirmDelete,
+  confirmSave,
+  showError,
+  showSuccess,
+} from "@/utils/swal";
+import {
   activarAlertasCompletas,
   estadoPermisoNotificacion,
   tienePermisoNotificacionConcedido,
@@ -556,6 +562,7 @@ const guardarNuevoContactoAgente = () => {
     ciudad: String(agentCreateForm.value.ciudad || "").trim(),
     entidad: String(agentCreateForm.value.entidad || "").trim(),
     email: String(agentCreateForm.value.email || "").trim(),
+    agentId: obtenerAgenteIdActual(),
     origen: "Interno",
   };
 
@@ -579,15 +586,133 @@ const guardarNuevoContactoAgente = () => {
 
     if (failed) {
       agentCreateFeedback.value =
-        response?.message || response?.error || "No se pudo crear el contacto.";
+        response?.mensaje ||
+        response?.message ||
+        response?.error ||
+        "No se pudo crear el contacto.";
       return;
     }
 
     agentCreateFeedback.value = "Contacto creado correctamente.";
-    limpiarFormularioCrearContacto();
     refrescarContactosAgente();
-    agentViewMode.value = "contacts";
+    limpiarFormularioCrearContacto();
+
+    const conv = response?.conversacion;
+    const convId = String(conv?.id || "").trim();
+    if (convId) {
+      store.upsertConversation({
+        id: convId,
+        nombre,
+        name: nombre,
+        telefono,
+        estado: conv.estado || "nuevo",
+        agenteId: obtenerAgenteIdActual(),
+        contactoId: payload.identificacion || telefono,
+        metadata: {
+          nombre,
+          telefono,
+          email: payload.email,
+          ciudad: payload.ciudad,
+          direccion: payload.direccion,
+          entidad: payload.entidad,
+          dni: payload.identificacion,
+          data: payload.identificacion,
+        },
+      });
+      abrirPanelContactoDesdeDatos(payload, conv);
+    } else {
+      agentViewMode.value = "contacts";
+    }
   });
+};
+
+const abrirPanelContactoDesdeDatos = (data, conv = null) => {
+  const convId = String(conv?.id || "").trim();
+  contactoSeleccionado.value = {
+    id: convId || "-",
+    nombre: data.nombre,
+    fotoPerfil: buildPersonAvatarUrl(data.nombre, "contact"),
+    estado: "Desconectado",
+    online: false,
+    telefono: data.telefono,
+    email: data.email || "-",
+    ciudad: data.ciudad || "-",
+    direccion: data.direccion || "-",
+    entidad: data.entidad || "-",
+    documento: data.identificacion || "-",
+    origen: data.origen || "Interno",
+    convEstado: String(conv?.estado || "nuevo").toLowerCase(),
+    esRecienCreado: true,
+  };
+  sidebarMode.value = "cliente";
+  infoModalOpen.value = true;
+  tipoConversacion.value = "cliente";
+  cerrarInfoAgente();
+};
+
+const mostrarIniciarConversacion = computed(() => {
+  const id = String(contactoSeleccionado.value?.id || "").trim();
+  return Boolean(id && id !== "-");
+});
+
+const iniciarConversacionLabel = computed(() => {
+  const estado = String(
+    contactoSeleccionado.value?.convEstado || "nuevo",
+  ).toLowerCase();
+  if (estado === "cerrada") return "REABRIR CONVERSACIÓN";
+  if (estado === "abierta") return "ABRIR CHAT";
+  return "INICIAR CONVERSACIÓN";
+});
+
+const iniciarConversacionContacto = async () => {
+  const convId = String(contactoSeleccionado.value?.id || "").trim();
+  if (!convId || convId === "-") return;
+
+  const estado = String(
+    contactoSeleccionado.value?.convEstado || "nuevo",
+  ).toLowerCase();
+  const uid = obtenerAgenteIdActual();
+
+  if (estado === "cerrada") {
+    await reabrirConversacion({
+      id: convId,
+      nombre: contactoSeleccionado.value?.nombre,
+      telefono: contactoSeleccionado.value?.telefono,
+    });
+    emit("select", convId);
+    cerrarInfoCliente();
+    return;
+  }
+
+  if (estado === "nuevo" || estado === "pendiente") {
+    try {
+      const resp = await abrirChat(convId, uid);
+      const failed =
+        resp?.ok === false || resp?.success === false || Boolean(resp?.error);
+      if (failed) {
+        await showError(
+          resp?.error ||
+            resp?.message ||
+            resp?.mensaje ||
+            "No se pudo iniciar la conversación.",
+        );
+        return;
+      }
+      store.upsertConversation({
+        id: convId,
+        estado: "abierta",
+        nombre: contactoSeleccionado.value?.nombre,
+        name: contactoSeleccionado.value?.nombre,
+        telefono: contactoSeleccionado.value?.telefono,
+      });
+    } catch {
+      await showError("No se pudo iniciar la conversación.");
+      return;
+    }
+  }
+
+  emit("select", convId);
+  cerrarInfoCliente();
 };
 
 const initialsFromName = (name) => {
@@ -641,6 +766,8 @@ const abrirInfoCliente = (event, conv) => {
     entidad: conv?.entidad || meta?.entidad || "-",
     documento: conv?.data || meta?.data || meta?.dni || "-",
     origen: conv?.origen || meta?.origen || "-",
+    convEstado: String(conv?.estado || "nuevo").toLowerCase(),
+    esRecienCreado: false,
   };
   infoModalOpen.value = true;
 };
@@ -648,6 +775,148 @@ const abrirInfoCliente = (event, conv) => {
 const cerrarInfoCliente = () => {
   infoModalOpen.value = false;
   contactoSeleccionado.value = null;
+  sidebarMode.value = "cliente";
+};
+
+const abrirFormEditar = () => {
+  const c = contactoSeleccionado.value;
+  if (!c) return;
+  editForm.value = {
+    nombre: c.nombre === "-" ? "" : String(c.nombre || ""),
+    telefono: c.telefono === "-" ? "" : String(c.telefono || ""),
+    email: c.email === "-" ? "" : String(c.email || ""),
+    documento: c.documento === "-" ? "" : String(c.documento || ""),
+    ciudad: c.ciudad === "-" ? "" : String(c.ciudad || ""),
+    direccion: c.direccion === "-" ? "" : String(c.direccion || ""),
+    entidad: c.entidad === "-" ? "" : String(c.entidad || ""),
+  };
+  sidebarMode.value = "editForm";
+};
+
+const cancelarEdicion = () => {
+  sidebarMode.value = "cliente";
+};
+
+const guardarEdicion = async () => {
+  const nombre = String(editForm.value.nombre || "").trim();
+  const telefono = String(editForm.value.telefono || "").trim();
+  if (!nombre || !telefono) {
+    await showError("Nombre y teléfono son requeridos.");
+    return;
+  }
+
+  const confirmed = await confirmSave();
+  if (!confirmed) return;
+
+  const convId = String(contactoSeleccionado.value?.id || "").trim();
+  emitSocket(
+    "editarContacto",
+    {
+      nombre,
+      telefono,
+      identificacion: String(editForm.value.documento || "").trim(),
+      email: String(editForm.value.email || "").trim(),
+      ciudad: String(editForm.value.ciudad || "").trim(),
+      direccion: String(editForm.value.direccion || "").trim(),
+      entidad: String(editForm.value.entidad || "").trim(),
+      convId,
+    },
+    async (res) => {
+      if (res?.ok === false || res?.success === false) {
+        await showError(
+          res?.message || res?.mensaje || res?.error || "Error al guardar.",
+        );
+        return;
+      }
+      if (convId) {
+        store.upsertConversation({
+          id: convId,
+          nombre,
+          name: nombre,
+          telefono,
+          email: editForm.value.email,
+          ciudad: editForm.value.ciudad,
+          direccion: editForm.value.direccion,
+          entidad: editForm.value.entidad,
+          metadata: {
+            nombre,
+            telefono,
+            email: editForm.value.email,
+            ciudad: editForm.value.ciudad,
+            direccion: editForm.value.direccion,
+            entidad: editForm.value.entidad,
+            dni: editForm.value.documento,
+            data: editForm.value.documento,
+          },
+        });
+        contactoSeleccionado.value = {
+          ...contactoSeleccionado.value,
+          nombre,
+          telefono,
+          email: editForm.value.email,
+          ciudad: editForm.value.ciudad,
+          direccion: editForm.value.direccion,
+          entidad: editForm.value.entidad,
+          documento: editForm.value.documento,
+        };
+      }
+      sidebarMode.value = "cliente";
+      fetchContacts();
+      await showSuccess("Contacto actualizado correctamente.");
+    },
+  );
+};
+
+const eliminarContactoFn = async () => {
+  const convId = String(contactoSeleccionado.value?.id || "").trim();
+  if (!convId) return;
+
+  const confirmed = await confirmDelete();
+  if (!confirmed) return;
+
+  emitSocket("eliminarContacto", { convId }, async (res) => {
+    if (res?.ok === false || res?.success === false) {
+      await showError(res?.message || res?.error || "No se pudo eliminar.");
+      return;
+    }
+    store.removeConversation(convId);
+    cerrarInfoCliente();
+    fetchContacts();
+    await showSuccess("Contacto eliminado correctamente.");
+  });
+};
+
+const marcarContacto = (flag) => {
+  const convId = String(contactoSeleccionado.value?.id || "").trim();
+  if (!convId) return;
+  let marca = "normal";
+  let estadoConv = "abierta";
+  if (flag === "destacado") {
+    marca = "destacado";
+    estadoConv = "abierta";
+  } else if (flag === "bloqueado") {
+    marca = "bloqueado";
+    estadoConv = "cerrada";
+  }
+  const socket = getSocket();
+  if (!socket?.connected) return;
+  socket.emit(
+    "actualizarMarca",
+    contactoSeleccionado.value,
+    marca,
+    estadoConv,
+  );
+  store.upsertConversation({
+    id: convId,
+    destacado: marca === "destacado",
+    bloqueado: marca === "bloqueado",
+    estado: estadoConv,
+    marca,
+  });
+};
+
+const abrirHistorial = () => {
+  sidebarMode.value = "historico";
 };
 
 const abrirEtiquetas = (e, conv) => {
@@ -1153,6 +1422,20 @@ onMounted(() => {
             <strong>Conversacion:</strong> #{{
               contactoSeleccionado?.id || "-"
             }}
+          </div>
+
+          <div
+            v-if="mostrarIniciarConversacion"
+            class="contacto-actions contacto-actions-start"
+          >
+            <button
+              type="button"
+              class="sidepanel-btn sidepanel-btn-primary"
+              @click="iniciarConversacionContacto"
+            >
+              <span class="icon" aria-hidden="true">&#128172;</span>
+              {{ iniciarConversacionLabel }}
+            </button>
           </div>
 
           <div class="contacto-actions">
@@ -2997,6 +3280,25 @@ onMounted(() => {
   background: #edf4e4;
   border-color: #7eb83b;
   color: #a31212;
+}
+
+.sidepanel-btn-primary {
+  background: #7eb83b;
+  border-color: #6aa832;
+  color: #fff;
+  font-weight: 600;
+}
+
+.sidepanel-btn-primary:hover {
+  background: #6aa832;
+  border-color: #5a9228;
+  color: #fff;
+}
+
+.contacto-actions-start {
+  margin-bottom: 4px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e5e7eb;
 }
 
 .form-group {

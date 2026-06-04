@@ -156,18 +156,39 @@ export function useChatSocket(userId = resolveAgentIdFromSources()) {
       fetchInternalAgents((agentes) => store.setAgentesInternos(agentes));
     },
     onUpdateQueues: async (data) => {
-      const total =
-        (data?.activos?.length || 0) +
-        (data?.nuevos?.length || 0) +
-        (data?.cerrados?.length || 0);
-      if (total > 0 || countQueuesLocal(store) === 0) {
-        store.setQueueState(data);
-        await enrichConversationsWithContacts(store);
-      }
+      store.setQueueState(data);
+      await enrichConversationsWithContacts(store);
+    },
+    onInitState: async (data) => {
+      store.setQueueState(data);
+      await enrichConversationsWithContacts(store);
     },
     onChatMessage: ({ convId, msg }) => {
-      store.addMessage(convId, msg);
-      notifyIncomingClientMessage(store, convId, msg);
+      const id = String(convId || "").trim();
+      if (!id) return;
+      store.addMessage(id, msg);
+      notifyIncomingClientMessage(store, id, msg);
+    },
+    onClientMessage: (data) => {
+      const convId = String(
+        data?.convId ||
+          data?.conversacion_id ||
+          data?.conversacionId ||
+          "",
+      ).trim();
+      if (!convId) return;
+      store.addMessage(convId, {
+        id: data?.id || data?.idMensaje || `client_${Date.now()}`,
+        emisor: "cliente",
+        mensaje: data?.mensaje || data?.text || "",
+        text: data?.mensaje || data?.text || "",
+        tipo: data?.tipo || "texto",
+        archivo_url: data?.archivo_url || data?.mediaUrl || null,
+        timestamp: data?.timestamp
+          ? new Date(data.timestamp).getTime()
+          : Date.now(),
+      });
+      notifyIncomingClientMessage(store, convId, data);
     },
     onMessageConfirmed: ({ convId, msg, tempId }) => {
       store.confirmMessage(convId, msg, tempId);
