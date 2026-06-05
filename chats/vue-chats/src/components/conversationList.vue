@@ -25,7 +25,7 @@ function cancelReopenConversation() {
 
 import { computed, ref, watch, onMounted } from "vue";
 import { useChatStore } from "@/stores/chatStore";
-import { getSocket, emitSocket, abrirChat } from "@/composables/useSocket";
+import { getSocket, emitSocket, abrirChat, cambiarConversacion, promoverNuevoSiHayCupo } from "@/composables/useSocket";
 import LabelAssigner from "@/components/LabelAssigner.vue";
 import { useContacts } from "@/composables/useContacts";
 import {
@@ -565,7 +565,7 @@ const guardarNuevoContactoAgente = () => {
     entidad: String(agentCreateForm.value.entidad || "").trim(),
     email: String(agentCreateForm.value.email || "").trim(),
     agentId: obtenerAgenteIdActual(),
-    origen: "Interno",
+    origen: "manual",
   };
 
   const socket = getSocket();
@@ -608,6 +608,7 @@ const guardarNuevoContactoAgente = () => {
         name: nombre,
         telefono,
         estado: conv.estado || "nuevo",
+        origen: conv.origen || "manual",
         agenteId: obtenerAgenteIdActual(),
         contactoId: payload.identificacion || telefono,
         metadata: {
@@ -619,6 +620,7 @@ const guardarNuevoContactoAgente = () => {
           entidad: payload.entidad,
           dni: payload.identificacion,
           data: payload.identificacion,
+          origen: conv.origen || "manual",
         },
       });
       abrirPanelContactoDesdeDatos(payload, conv);
@@ -686,31 +688,45 @@ const iniciarConversacionContacto = async () => {
     return;
   }
 
+  const snapshot = {
+    id: convId,
+    nombre: contactoSeleccionado.value?.nombre,
+    name: contactoSeleccionado.value?.nombre,
+    telefono: contactoSeleccionado.value?.telefono,
+  };
+
   if (estado === "nuevo" || estado === "pendiente") {
     try {
-      const resp = await abrirChat(convId, uid);
-      const failed =
-        resp?.ok === false || resp?.success === false || Boolean(resp?.error);
-      if (failed) {
-        await showError(
-          resp?.error ||
-            resp?.message ||
-            resp?.mensaje ||
-            "No se pudo iniciar la conversación.",
-        );
-        return;
-      }
-      store.upsertConversation({
-        id: convId,
-        estado: "abierta",
-        nombre: contactoSeleccionado.value?.nombre,
-        name: contactoSeleccionado.value?.nombre,
-        telefono: contactoSeleccionado.value?.telefono,
+      const conv = store.conversaciones[convId] || {};
+      const anterior = String(store.conversacionActivaId || "").trim();
+      const result = await promoverNuevoSiHayCupo({
+        convId,
+        userId: uid,
+        conv: { ...conv, ...snapshot },
+        convIdAnterior: anterior || null,
       });
+      store.upsertConversation({ ...snapshot, estado: result.estado });
     } catch {
-      await showError("No se pudo iniciar la conversación.");
+      await showError("No se pudo abrir la conversación.");
       return;
     }
+    emit("select", convId);
+    cerrarInfoCliente();
+    return;
+  }
+
+  if (estado === "abierta") {
+    store.upsertConversation({ ...snapshot, estado: "abierta" });
+    try {
+      const anterior = String(store.conversacionActivaId || "").trim();
+      await cambiarConversacion(anterior || null, convId);
+    } catch {
+      await showError("No se pudo abrir la conversación.");
+      return;
+    }
+    emit("select", convId);
+    cerrarInfoCliente();
+    return;
   }
 
   emit("select", convId);
@@ -943,18 +959,23 @@ const onCambiarFiltros = (event) => {
 const conversationsFiltered = computed(() => {
   const filtrosActivos = store.filtrosEtiquetasSeleccionadas;
 
+  const agenteActual = String(obtenerAgenteIdActual() || "").trim();
+  const convPerteneceAlAgente = (conv) => {
+    const owner = String(conv?.agenteId || conv?.agente_id || "").trim();
+    return Boolean(agenteActual && owner && owner === agenteActual);
+  };
+
   // Filtrar por tipo de conversación
   let convers = props.conversations.filter((conv) => {
-    // Si tiene propiedad origen y es 'Interno', es interno, si no, es cliente
+    const origen = String(conv?.origen || conv?.metadata?.origen || "")
+      .trim()
+      .toLowerCase();
+
     if (tipoConversacion.value === "interno") {
-      return (
-        (conv.origen || conv.metadata?.origen || "").toLowerCase() === "interno"
-      );
-    } else {
-      return (
-        (conv.origen || conv.metadata?.origen || "").toLowerCase() !== "interno"
-      );
+      return origen === "interno" && !convPerteneceAlAgente(conv);
     }
+
+    return origen !== "interno" || convPerteneceAlAgente(conv);
   });
 
   if (!Array.isArray(filtrosActivos) || filtrosActivos.length === 0) {

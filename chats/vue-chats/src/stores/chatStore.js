@@ -21,6 +21,11 @@ const normalizeConvId = (value) => {
   return id;
 };
 
+const isInternoConversation = (conv = {}) =>
+  String(conv?.origen || conv?.metadata?.origen || "")
+    .trim()
+    .toLowerCase() === "interno";
+
 const isInternalConversationId = (convId) =>
   String(convId || "")
     .trim()
@@ -218,8 +223,12 @@ export const useChatStore = defineStore("chat", () => {
     ).filter((c) => c.estado === "abierta");
   });
 
+  const activosCliente = computed(() =>
+    activos.value.filter((conv) => !isInternoConversation(conv)),
+  );
+
   const activeCountSynced = computed(() => {
-    const uiCount = activos.value.length;
+    const uiCount = activosCliente.value.length;
     const dbCount = Number(activeCountDb.value || 0);
     return Math.max(uiCount, dbCount);
   });
@@ -355,6 +364,21 @@ export const useChatStore = defineStore("chat", () => {
     for (const conv of winners) {
       if (conv?.id) prunedMap[conv.id] = nextMap[conv.id];
     }
+
+    const preserveIds = new Set();
+    for (const list of [stateActivos, stateNuevos, stateCerrados]) {
+      for (const item of dedupeConversationsByPhonePerEstado(list)) {
+        const id = normalizeConvId(item?.id);
+        if (id) preserveIds.add(id);
+      }
+    }
+    const activeIdToPreserve = normalizeConvId(conversacionActivaId.value);
+    if (activeIdToPreserve) preserveIds.add(activeIdToPreserve);
+
+    for (const id of preserveIds) {
+      if (nextMap[id]) prunedMap[id] = nextMap[id];
+    }
+
     conversaciones.value = prunedMap;
 
     const activeId = normalizeConvId(conversacionActivaId.value);
@@ -379,7 +403,9 @@ export const useChatStore = defineStore("chat", () => {
       conversacionActivaId.value = null;
     }
 
-    activeCountDb.value = winners.filter((conv) => conv.estado === "abierta").length;
+    activeCountDb.value = winners.filter(
+      (conv) => conv.estado === "abierta" && !isInternoConversation(conv),
+    ).length;
     initialized.value = true;
   };
 

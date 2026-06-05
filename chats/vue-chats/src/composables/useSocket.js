@@ -759,6 +759,56 @@ export function enviarMensajeChat({ convId, text, origen = 'web', numero = null,
   });
 }
 
+function isInternoConversation(conv = {}) {
+  return (
+    String(conv?.origen || conv?.metadata?.origen || "")
+      .trim()
+      .toLowerCase() === "interno"
+  );
+}
+
+/**
+ * Abre un chat nuevo: pasa a activo si hay cupo; si no, queda en nuevos.
+ */
+export async function promoverNuevoSiHayCupo({
+  convId,
+  userId,
+  conv = {},
+  convIdAnterior = null,
+} = {}) {
+  const id = String(convId || "").trim();
+  const uid = String(userId || "").trim();
+  if (!id || !uid) {
+    return { promoted: false, estado: "nuevo", error: "Datos incompletos" };
+  }
+
+  const anterior = String(convIdAnterior || "").trim() || null;
+
+  if (isInternoConversation(conv)) {
+    await cambiarConversacion(anterior, id);
+    return { promoted: false, estado: "nuevo" };
+  }
+
+  const resp = await abrirChat(id, uid);
+  const failed =
+    resp?.success === false || resp?.ok === false || Boolean(resp?.error);
+
+  if (!failed) {
+    if (anterior && anterior !== id) {
+      await cambiarConversacion(anterior, id);
+    }
+    return { promoted: true, estado: "abierta", response: resp };
+  }
+
+  await cambiarConversacion(anterior, id);
+  return {
+    promoted: false,
+    estado: "nuevo",
+    error: resp?.error,
+    response: resp,
+  };
+}
+
 /**
  * Solicita abrir un chat
  */
@@ -875,6 +925,7 @@ export default {
   enviarMensajeChat,
   enviarMensajeInterno,
   abrirChat,
+  promoverNuevoSiHayCupo,
   cerrarChat,
   reabrirChat,
   obtenerConteoActivos,

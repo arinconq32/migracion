@@ -15,7 +15,7 @@ import {
   mapInternalMessagesForUi,
 } from "@/composables/useInternalChatSocket";
 import { useAgentProfile } from "@/composables/useAgentProfile";
-import { cargarMensajesConversacion, getSocket, cargarMultimediaDeConversacion, cambiarConversacion, abrirChat } from "@/composables/useSocket";
+import { cargarMensajesConversacion, getSocket, cargarMultimediaDeConversacion, cambiarConversacion, abrirChat, promoverNuevoSiHayCupo } from "@/composables/useSocket";
 
 const store = useChatStore();
 const { mensajesInternosPorPeer, conversacionActivaId, internalMessagesRevision } =
@@ -335,21 +335,22 @@ const onSelectConversation = async (id) => {
   store.selectConversation(nextId);
 
   try {
-    if (estado === "nuevo") {
-      const resp = await abrirChat(nextId, agenteIdActual);
-      const failed =
-        resp?.success === false ||
-        resp?.ok === false ||
-        Boolean(resp?.error);
-      if (failed) {
-        console.error("No se pudo abrir la conversación:", resp?.error || resp);
-      } else {
-        store.upsertConversation({
-          ...(conv || {}),
-          id: nextId,
-          estado: "abierta",
-        });
-      }
+    if (estado === "nuevo" || estado === "pendiente") {
+      const anteriorValido =
+        anterior && String(anterior) !== nextId && !parseInternalPeerId(anterior)
+          ? anterior
+          : null;
+      const result = await promoverNuevoSiHayCupo({
+        convId: nextId,
+        userId: agenteIdActual,
+        conv: conv || {},
+        convIdAnterior: anteriorValido,
+      });
+      store.upsertConversation({
+        ...(conv || {}),
+        id: nextId,
+        estado: result.estado,
+      });
     } else if (estado === "abierta") {
       if (anterior && String(anterior) !== nextId && !parseInternalPeerId(anterior)) {
         await cambiarConversacion(anterior, nextId);

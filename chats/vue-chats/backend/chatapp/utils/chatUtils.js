@@ -173,10 +173,12 @@ const assignNext = async (uid) => {
     throw error;
   }
 
-  setTimeout(async () => {
-    console.log("📢 Ejecutando broadcast con delay...");
-    await broadcast();
-  }, 100);
+  try {
+    await broadcastForUser(uid);
+    await broadcast({ log: false });
+  } catch (error) {
+    console.warn("broadcast tras assignNext:", error.message);
+  }
 };
 
 const broadcastEtiquetasCatalog = async () => {

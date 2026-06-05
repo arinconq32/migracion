@@ -583,6 +583,14 @@ class ChatModelMongo {
     }
   }
 
+  isInternoConversation(conv = {}) {
+    return (
+      String(conv.origen || conv.metadata?.origen || "")
+        .trim()
+        .toLowerCase() === "interno"
+    );
+  }
+
   isInconsistentAbierta(conv = {}) {
     return (
       String(conv.estado || "").toLowerCase() === "abierta" && Boolean(conv.fin)
@@ -619,7 +627,10 @@ class ChatModelMongo {
   async getVisibleQueueState(agenteId) {
     const activosRaw = await this.getConversaciones(agenteId, "abierta");
     const cerradosRaw = await this.getConversaciones(agenteId, "cerrada");
-    const nuevosRaw = await this.getPendientes();
+    const nuevosRaw = dedupeConversationsByPhonePerEstado([
+      ...(await this.getPendientes()),
+      ...(agenteId ? await this.getConversaciones(agenteId, "nuevo") : []),
+    ]);
 
     const deduped = dedupeConversationsByPhonePerEstado([
       ...activosRaw,
@@ -655,7 +666,11 @@ class ChatModelMongo {
 
   async countActiveConversations(agenteId) {
     const { activos } = await this.getVisibleQueueState(agenteId);
-    return activos.length;
+    return activos.filter((conv) => !this.isInternoConversation(conv)).length;
+  }
+
+  filterClienteActivos(activos = []) {
+    return activos.filter((conv) => !this.isInternoConversation(conv));
   }
 
   async reconcileInconsistentAbierta(agenteId) {
@@ -733,6 +748,36 @@ class ChatModelMongo {
     return closed;
   }
 
+  async reconcileInternoAbiertaToNuevo(agenteId) {
+    const uid = String(agenteId || "").trim();
+    if (!uid) return 0;
+
+    const agenteFilter = this.buildAgentIdFilter(uid);
+    if (!agenteFilter) return 0;
+
+    const db = mongoose.connection.db;
+    const result = await db.collection("conversaciones").updateMany(
+      {
+        $or: [{ agenteId: agenteFilter }, { agente_id: agenteFilter }],
+        estado: "abierta",
+        origen: { $regex: /^interno$/i },
+      },
+      {
+        $set: { estado: "nuevo", ultima_actividad: new Date() },
+        $unset: { fin: "" },
+      },
+    );
+
+    if (result.modifiedCount > 0) {
+      await this.invalidateAgentConversationCaches(uid);
+      console.log(
+        `🔧 Agente ${uid}: ${result.modifiedCount} conversación(es) interna(s) devuelta(s) a nuevos`,
+      );
+    }
+
+    return result.modifiedCount || 0;
+  }
+
   async repairActiveConversations(agenteId) {
     const uid = String(agenteId || "").trim();
     if (!uid) return { activos: [], reconciled: 0 };
@@ -785,6 +830,7 @@ class ChatModelMongo {
 
       const assigned = await Conversation.findOne({
         estado: "nuevo",
+        origen: { $not: /^interno$/i },
         $or: [{ agenteId: uid }, { agente_id: uid }],
       })
         .sort({ inicio: 1 })
@@ -792,7 +838,10 @@ class ChatModelMongo {
       if (assigned?._id) return String(assigned._id);
     }
 
-    const pending = await Conversation.findOne({ estado: "nuevo" })
+    const pending = await Conversation.findOne({
+      estado: "nuevo",
+      origen: { $not: /^interno$/i },
+    })
       .sort({ inicio: 1 })
       .lean();
     return pending?._id ? String(pending._id) : null;
@@ -1161,14 +1210,18 @@ class ChatModelMongo {
     const dataContacto = String(contactoId || phone).trim();
     const now = new Date();
 
-    let targetState = estado || (normalizedAgent ? "abierta" : "nuevo");
+    const requestedState = String(estado || "").toLowerCase();
+    let targetState =
+      requestedState ||
+      (normalizedAgent ? "abierta" : "nuevo");
     if (normalizedAgent && targetState === "abierta") {
       const active = await this.countActiveConversations(normalizedAgent);
       const maxActive = Number(process.env.MAX_ACTIVE_CONVERSATIONS || 3);
       if (active >= maxActive) targetState = "nuevo";
     }
 
-    const existing = await this.getLatestConversationByPhone(phone);
+    // Solo reutilizar hilos abiertos/nuevos; nunca sobrescribir conversaciones cerradas.
+    const existing = await this.getOpenConversationByPhone(phone);
 
     if (existing?._id) {
       const update = {
@@ -1186,10 +1239,15 @@ class ChatModelMongo {
       if (normalizedAgent) {
         update.agenteId = normalizedAgent;
         update.agente_id = normalizedAgent;
-        update.estado = targetState;
+        const currentEstado = String(existing.estado || "").toLowerCase();
+        if (!(currentEstado === "abierta" && targetState === "nuevo")) {
+          update.estado = targetState;
+        }
       }
       await col.updateOne({ _id: existing._id }, { $set: update });
-      if (normalizedAgent) await safeDel(`conversaciones:${normalizedAgent}`);
+      if (normalizedAgent) {
+        await this.invalidateAgentConversationCaches(normalizedAgent);
+      }
       const refreshed = await col.findOne({ _id: existing._id });
       return this.normalizeConversation(refreshed);
     }
@@ -1220,7 +1278,10 @@ class ChatModelMongo {
     };
 
     const result = await col.insertOne(insert);
-    if (normalizedAgent) await safeDel(`conversaciones:${normalizedAgent}`);
+    if (normalizedAgent) {
+      await this.invalidateAgentConversationCaches(normalizedAgent);
+    }
+    await safeDel("conversaciones:all");
     return this.normalizeConversation({ _id: result.insertedId, ...insert });
   }
 
@@ -1700,6 +1761,7 @@ class ChatModelMongo {
         contactoId: identificacion,
         cola: entidad || null,
         origen: String(payload.origen || "manual").trim() || "whatsapp",
+        estado: "nuevo",
       });
     }
 

@@ -40,12 +40,16 @@ class ChatSocketHandler {
     if (!uid) return;
 
     const synced = await this.syncAgentActiveConversations(uid);
-    const count = synced.activos?.length ?? 0;
+    const clienteActivos =
+      typeof this.chatModel.filterClienteActivos === "function"
+        ? this.chatModel.filterClienteActivos(synced.activos || [])
+        : synced.activos || [];
+    const count = clienteActivos.length;
     const payload = {
       count,
       max: this.MAX_ACTIVE,
       source: "database",
-      activeIds: (synced.activos || []).map((conv) => String(conv.id)),
+      activeIds: clienteActivos.map((conv) => String(conv.id)),
       reconciled: synced.reconciled || 0,
       ts: Date.now(),
     };
@@ -157,14 +161,21 @@ class ChatSocketHandler {
 
         if (!alreadyOpenForAgent) {
           const synced = await this.syncAgentActiveConversations(uid);
-          const activeCount = synced.activos?.length ?? 0;
-          if (activeCount >= this.MAX_ACTIVE) {
+          const clienteActivos =
+            typeof this.chatModel.filterClienteActivos === "function"
+              ? this.chatModel.filterClienteActivos(synced.activos || [])
+              : synced.activos || [];
+          const activeCount = clienteActivos.length;
+          const convOrigen = String(conv?.origen || "").toLowerCase();
+          const isInternoOpen = convOrigen === "interno";
+
+          if (!isInternoOpen && activeCount >= this.MAX_ACTIVE) {
             const errPayload = {
               success: false,
               error: `Máximo de ${this.MAX_ACTIVE} chats activos alcanzado`,
               count: activeCount,
               max: this.MAX_ACTIVE,
-              activeIds: (synced.activos || []).map((conv) => String(conv.id)),
+              activeIds: clienteActivos.map((c) => String(c.id)),
             };
             socket.emit("error_msg", errPayload.error);
             if (typeof callback === "function") callback(errPayload);
@@ -516,7 +527,12 @@ class ChatSocketHandler {
           );
         }
 
-        await this.chatUtils.broadcast();
+        const uid = String(socket.data.userId || "").trim();
+        if (uid) {
+          await this.chatUtils.broadcastForUser(uid, { log: false });
+        } else {
+          await this.chatUtils.broadcast({ log: false });
+        }
       } catch (error) {
         console.error("Error en chat_message:", error.message);
         socket.emit("error_msg", "Error al procesar el mensaje");
