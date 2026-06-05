@@ -1,16 +1,37 @@
 import Swal from "sweetalert2";
 
+const SWAL_Z_INDEX = 20000;
+
 const baseConfig = {
   confirmButtonColor: "#7eb83b",
   cancelButtonColor: "#6b7280",
+  didOpen: (popup) => {
+    const container = popup?.closest?.(".swal2-container");
+    if (container) {
+      container.style.zIndex = String(SWAL_Z_INDEX);
+    }
+  },
 };
+
+function fireSwal(options = {}) {
+  const userDidOpen = options.didOpen;
+  return Swal.fire({
+    ...baseConfig,
+    ...options,
+    didOpen: (popup) => {
+      baseConfig.didOpen(popup);
+      if (typeof userDidOpen === "function") {
+        userDidOpen(popup);
+      }
+    },
+  });
+}
 
 export async function confirmSave({
   title = "¿Guardar cambios?",
   text = "Se actualizará la información del contacto.",
 } = {}) {
-  const result = await Swal.fire({
-    ...baseConfig,
+  const result = await fireSwal({
     title,
     text,
     icon: "question",
@@ -25,8 +46,7 @@ export async function confirmDelete({
   title = "¿Eliminar contacto?",
   text = "Se eliminarán el contacto, la conversación y los mensajes asociados. Esta acción no se puede deshacer.",
 } = {}) {
-  const result = await Swal.fire({
-    ...baseConfig,
+  const result = await fireSwal({
     title,
     text,
     icon: "warning",
@@ -39,8 +59,7 @@ export async function confirmDelete({
 }
 
 export async function showError(message, title = "Error") {
-  await Swal.fire({
-    ...baseConfig,
+  await fireSwal({
     title,
     text: message,
     icon: "error",
@@ -49,8 +68,7 @@ export async function showError(message, title = "Error") {
 }
 
 export async function showSuccess(message, title = "Listo") {
-  await Swal.fire({
-    ...baseConfig,
+  await fireSwal({
     title,
     text: message,
     icon: "success",

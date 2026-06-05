@@ -25,20 +25,38 @@ class ChatSocketHandler {
     this.runtimeService = options.runtimeService || null;
   }
 
+  async syncAgentActiveConversations(uid) {
+    if (
+      typeof this.chatModel.syncActiveConversations !== "function" ||
+      !uid
+    ) {
+      return { activos: [], reconciled: 0 };
+    }
+
+    return this.chatModel.repairActiveConversations(uid);
+  }
+
   async emitActiveConversationsCountForUser(uid) {
     if (!uid) return;
 
-    const count = await this.chatModel.countActiveConversations(uid);
+    const synced = await this.syncAgentActiveConversations(uid);
+    const count = synced.activos?.length ?? 0;
+    const payload = {
+      count,
+      max: this.MAX_ACTIVE,
+      source: "database",
+      activeIds: (synced.activos || []).map((conv) => String(conv.id)),
+      reconciled: synced.reconciled || 0,
+      ts: Date.now(),
+    };
+
     for (const s of this.io.sockets.sockets.values()) {
       if (String(s.data.userId || "") === String(uid)) {
-        s.emit("active_conversations_count", {
-          count,
-          max: this.MAX_ACTIVE,
-          source: "memory",
-          ts: Date.now(),
-        });
+        s.emit("active_conversations_count", payload);
       }
     }
+
+    return payload;
   }
 
   handleConnection(socket) {
@@ -57,13 +75,16 @@ class ChatSocketHandler {
         this.runtimeService.registerSocketKeys(socket, { userId, exten });
       }
 
+      const agentKey = socket.data.userId || socket.data.exten;
+      if (agentKey) {
+        await this.syncAgentActiveConversations(agentKey);
+      }
+
       const state = await this.chatUtils.getState(
         socket.data.userId || socket.data.exten,
       );
       socket.emit("init_state", state);
-      await this.emitActiveConversationsCountForUser(
-        socket.data.userId || socket.data.exten,
-      );
+      await this.emitActiveConversationsCountForUser(agentKey);
 
       if (this.runtimeService) {
         const agenteInternoId = this.runtimeService.getInternalAgentId({
@@ -100,16 +121,17 @@ class ChatSocketHandler {
           return;
         }
 
-        const count = await this.chatModel.countActiveConversations(uid);
-        const response = {
-          success: true,
-          count,
-          max: this.MAX_ACTIVE,
-          source: "memory",
-          ts: Date.now(),
-        };
-        socket.emit("active_conversations_count", response);
-        if (typeof callback === "function") callback(response);
+        const response = await this.emitActiveConversationsCountForUser(uid);
+        if (typeof callback === "function") {
+          callback({
+            success: true,
+            count: response?.count ?? 0,
+            max: response?.max ?? this.MAX_ACTIVE,
+            activeIds: response?.activeIds || [],
+            source: "database",
+            ts: Date.now(),
+          });
+        }
       },
     );
 
@@ -134,13 +156,15 @@ class ChatSocketHandler {
           convEstado === "abierta" && convAgent && convAgent === uid;
 
         if (!alreadyOpenForAgent) {
-          const activeCount = await this.chatModel.countActiveConversations(uid);
+          const synced = await this.syncAgentActiveConversations(uid);
+          const activeCount = synced.activos?.length ?? 0;
           if (activeCount >= this.MAX_ACTIVE) {
             const errPayload = {
               success: false,
               error: `Máximo de ${this.MAX_ACTIVE} chats activos alcanzado`,
               count: activeCount,
               max: this.MAX_ACTIVE,
+              activeIds: (synced.activos || []).map((conv) => String(conv.id)),
             };
             socket.emit("error_msg", errPayload.error);
             if (typeof callback === "function") callback(errPayload);
@@ -163,12 +187,20 @@ class ChatSocketHandler {
         socket.join(convIdStr);
         socket.data.currentConvId = convIdStr;
 
-        await this.chatUtils.broadcast();
-        await this.emitActiveConversationsCountForUser(uid);
+        socket.emit("conversation_state_changed", {
+          convId: convIdStr,
+          estado: "abierta",
+          agenteId: uid,
+        });
 
         if (typeof callback === "function") {
           callback({ success: true, ok: true, convId: convIdStr, estado: "abierta" });
         }
+
+        void this.chatUtils.broadcastForUser(uid).catch((error) => {
+          console.warn("broadcastForUser tras open_chat:", error.message);
+        });
+        void this.emitActiveConversationsCountForUser(uid);
       } catch (error) {
         const errMessage =
           error?.message === "ACTIVE_LIMIT_REACHED"
@@ -228,20 +260,31 @@ class ChatSocketHandler {
           .to(String(convId))
           .emit("chat_message", { convId, msg: systemMsg });
         socket.leave(String(convId));
+        socket.data.currentConvId = null;
+
+        socket.emit("conversation_state_changed", {
+          convId: String(convId),
+          estado: "cerrada",
+          agenteId: uid,
+          tipificacion,
+          idTipificacion,
+        });
 
         try {
-          await this.chatUtils.assignNext(uid);
-        } catch (assignError) {
+          await this.emitActiveConversationsCountForUser(uid);
+          await this.chatUtils.broadcastForUser(uid);
+        } catch (broadcastError) {
+          console.warn("broadcastForUser tras close_chat:", broadcastError.message);
+        }
+
+        if (typeof callback === "function") callback({ success: true });
+
+        void this.chatUtils.assignNext(uid).catch((assignError) => {
           console.warn(
             "assignNext tras cierre (no bloquea el cierre):",
             assignError.message,
           );
-        }
-
-        await this.chatUtils.broadcast();
-        await this.emitActiveConversationsCountForUser(uid);
-
-        if (typeof callback === "function") callback({ success: true });
+        });
       } catch (error) {
         console.error("Error cerrando chat:", error.message);
         if (typeof callback === "function")

@@ -119,6 +119,7 @@ export function useChatSocket(userId = resolveAgentIdFromSources()) {
   iniciarSocket(userId, {
     onConnect: () => {
       console.log("[useChatSocket] Conectado al servidor");
+      emitSocket("request_active_conversations_count", { userId });
       registerInternalIdentity(userId);
       fetchInternalAgents((agentes) => store.setAgentesInternos(agentes));
       const activePeer = parseInternalPeerId(store.conversacionActivaId);
@@ -155,13 +156,36 @@ export function useChatSocket(userId = resolveAgentIdFromSources()) {
     onInternalAgentStatus: () => {
       fetchInternalAgents((agentes) => store.setAgentesInternos(agentes));
     },
-    onUpdateQueues: async (data) => {
+    onUpdateQueues: (data) => {
       store.setQueueState(data);
-      await enrichConversationsWithContacts(store);
+      void enrichConversationsWithContacts(store);
     },
-    onInitState: async (data) => {
+    onInitState: (data) => {
       store.setQueueState(data);
-      await enrichConversationsWithContacts(store);
+      void enrichConversationsWithContacts(store);
+    },
+    onConversationStateChanged: ({ convId, estado, tipificacion } = {}) => {
+      const id = String(convId || "").trim();
+      const nextEstado = String(estado || "").toLowerCase();
+      if (!id || !nextEstado) return;
+
+      if (nextEstado === "cerrada") {
+        store.markConversationClosed(id, {
+          tipificacion: tipificacion || undefined,
+          motivoCierre: tipificacion || undefined,
+        });
+        return;
+      }
+      if (nextEstado === "abierta") {
+        store.markConversationOpened(id);
+      }
+    },
+    onActiveConversationsCount: (data) => {
+      store.setActiveConversationCount({
+        count: data?.count,
+        max: data?.max,
+        activeIds: data?.activeIds,
+      });
     },
     onChatMessage: ({ convId, msg }) => {
       const id = String(convId || "").trim();

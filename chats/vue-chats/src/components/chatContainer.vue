@@ -357,7 +357,28 @@ const onSelectConversation = async (id) => {
         await cambiarConversacion(null, nextId);
       }
     } else if (estado === "cerrada") {
-      await cambiarConversacion(anterior, nextId);
+      const resp = await abrirChat(nextId, agenteIdActual);
+      const failed =
+        resp?.success === false ||
+        resp?.ok === false ||
+        Boolean(resp?.error);
+      if (failed) {
+        console.error(
+          "No se pudo reabrir la conversación:",
+          resp?.error || resp,
+        );
+      } else {
+        store.upsertConversation({
+          ...(conv || {}),
+          id: nextId,
+          estado: "abierta",
+        });
+      }
+      if (anterior && String(anterior) !== nextId) {
+        await cambiarConversacion(anterior, nextId);
+      } else {
+        await cambiarConversacion(null, nextId);
+      }
     }
   } catch (error) {
     console.error("Error al preparar conversación:", error);

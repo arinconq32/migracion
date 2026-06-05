@@ -613,18 +613,38 @@ const cerrarPerfilContacto = () => {
   contactSidebarMode.value = "info";
 };
 
+const limpiarValorContacto = (valor, vacios = ["---", "-", "Contacto"]) => {
+  const texto = String(valor || "").trim();
+  return vacios.includes(texto) ? "" : texto;
+};
+
 const abrirEditarContacto = () => {
   const d = contactProfileData.value;
+  const conv = props.conversation || {};
+  const meta = conv.metadata || {};
+  const telefono =
+    limpiarValorContacto(d.telefono) ||
+    limpiarValorContacto(conv.telefono) ||
+    limpiarValorContacto(conv.tels) ||
+    limpiarValorContacto(conv.contacto_id) ||
+    limpiarValorContacto(meta.telefono);
+  const dni =
+    limpiarValorContacto(d.identificacion) ||
+    limpiarValorContacto(conv.data) ||
+    limpiarValorContacto(meta.dni) ||
+    limpiarValorContacto(meta.data);
+
   editContactForm.value = {
-    nombre: d.nombre === "Contacto" ? "" : d.nombre,
-    dni: d.identificacion === "---" ? "" : d.identificacion,
-    telefono: d.telefono === "---" ? "" : d.telefono,
-    email: d.email === "---" ? "" : d.email,
-    ciudad: d.ciudad === "---" ? "" : d.ciudad,
-    direccion: d.direccion === "---" ? "" : d.direccion,
-    entidad: d.entidad === "---" ? "" : d.entidad,
+    nombre: limpiarValorContacto(d.nombre, ["---", "-", "Contacto"]),
+    dni,
+    telefono,
+    email: limpiarValorContacto(d.email),
+    ciudad: limpiarValorContacto(d.ciudad),
+    direccion: limpiarValorContacto(d.direccion),
+    entidad: limpiarValorContacto(d.entidad),
   };
   editContactFeedback.value = "";
+  contactProfileModalOpen.value = false;
   editContactModalOpen.value = true;
 };
 
@@ -647,6 +667,13 @@ const guardarEdicionContacto = async () => {
   editContactSubmitting.value = true;
   editContactFeedback.value = "Guardando...";
 
+  const timeoutId = setTimeout(() => {
+    if (!editContactSubmitting.value) return;
+    editContactSubmitting.value = false;
+    editContactFeedback.value =
+      "Tiempo de espera agotado. Verifica la conexión e intenta de nuevo.";
+  }, 12000);
+
   emitSocket(
     "editarContacto",
     {
@@ -660,6 +687,7 @@ const guardarEdicionContacto = async () => {
       convId: props.conversation?.id,
     },
     async (res) => {
+      clearTimeout(timeoutId);
       editContactSubmitting.value = false;
       if (res?.ok === false || res?.error || res?.success === false) {
         editContactFeedback.value =
@@ -735,6 +763,48 @@ const cerrarMenuEtiquetas = () => {
   store.cerrarMenuEtiquetas();
 };
 
+const ejecutarCierreConversacion = async (motivo, observacion) => {
+  if (!props.conversation || !motivo || !observacion) return;
+
+  const convId = String(props.conversation.id || "").trim();
+  const snapshot = { ...props.conversation };
+
+  closeSubmitting.value = true;
+  closeError.value = "";
+
+  store.markConversationClosed(convId, {
+    tipificacion: motivo.desc,
+    motivoCierre: motivo.desc,
+    observaciones: observacion.desc,
+  });
+
+  const response = await cerrarChat({
+    convId,
+    idTipificacion: motivo.id,
+    tipificacion: motivo.desc,
+    idObservaciones: observacion.id,
+    observaciones: observacion.desc,
+    metadata: snapshot,
+  });
+
+  closeSubmitting.value = false;
+
+  if (!response?.success) {
+    store.upsertConversation({
+      ...snapshot,
+      estado: snapshot.estado || "abierta",
+    });
+    closeError.value = response?.error || "No se pudo cerrar la conversacion.";
+    closeConfirmModalOpen.value = false;
+    closeReasonModalOpen.value = true;
+    return;
+  }
+
+  motivoSeleccionado.value = null;
+  tipificacionSeleccionadaId.value = "";
+  cerrarFlujoCierre();
+};
+
 const seleccionarMotivoCierre = async (motivo) => {
   motivoSeleccionado.value = motivo || null;
   tipificacionSeleccionadaId.value = "";
@@ -754,7 +824,7 @@ const continuarConfirmacionCierre = () => {
     return;
   }
   if (!tipificacionSeleccionada.value) {
-    closeError.value = "Selecciona una observacion antes de continuar.";
+    closeError.value = "Selecciona un comentario antes de continuar.";
     return;
   }
   closeReasonModalOpen.value = false;
@@ -771,32 +841,14 @@ const confirmarCierreChat = async () => {
     !props.conversation ||
     !motivoSeleccionado.value ||
     !tipificacionSeleccionada.value
-  )
-    return;
-
-  closeSubmitting.value = true;
-  closeError.value = "";
-
-  const response = await cerrarChat({
-    convId: props.conversation.id,
-    idTipificacion: motivoSeleccionado.value.id,
-    tipificacion: motivoSeleccionado.value.desc,
-    idObservaciones: tipificacionSeleccionada.value.id,
-    observaciones: tipificacionSeleccionada.value.desc,
-    metadata: props.conversation,
-  });
-
-  closeSubmitting.value = false;
-
-  if (!response?.success) {
-    closeError.value = response?.error || "No se pudo cerrar la conversacion.";
-    closeConfirmModalOpen.value = false;
-    closeReasonModalOpen.value = true;
+  ) {
     return;
   }
 
-  store.markConversationClosed(props.conversation.id);
-  cerrarFlujoCierre();
+  await ejecutarCierreConversacion(
+    motivoSeleccionado.value,
+    tipificacionSeleccionada.value,
+  );
 };
 
 const send = () => {
@@ -2959,7 +3011,7 @@ const canSendText = computed(
       >
         <div class="close-flow-modal">
           <div class="historial-header">
-            <div class="historial-title">Observaciones de cierre</div>
+            <div class="historial-title">Comentarios de cierre</div>
             <button
               class="historial-close"
               type="button"
@@ -2981,14 +3033,14 @@ const canSendText = computed(
               </div>
             </div>
             <label class="close-flow-label" for="close-tipificacion"
-              >Observacion</label
+              >Comentario</label
             >
             <select
               id="close-tipificacion"
               v-model="tipificacionSeleccionadaId"
               class="close-flow-select"
             >
-              <option value="">Selecciona una observacion</option>
+              <option value="">Selecciona un comentario</option>
               <option
                 v-for="item in tipificaciones"
                 :key="item.id"
@@ -2998,7 +3050,7 @@ const canSendText = computed(
               </option>
             </select>
             <div v-if="tipificaciones.length === 0" class="close-menu-empty">
-              No hay observaciones disponibles.
+              No hay comentarios disponibles.
             </div>
             <div v-if="closeError" class="historial-error close-flow-error">
               {{ closeError }}
@@ -3045,7 +3097,7 @@ const canSendText = computed(
           <div class="close-flow-body">
             <p class="close-confirm-copy">
               Vas a cerrar este chat con el motivo
-              <strong>{{ motivoSeleccionado?.desc }}</strong> y la observacion
+              <strong>{{ motivoSeleccionado?.desc }}</strong> y el comentario
               <strong>{{ tipificacionSeleccionada?.desc }}</strong
               >.
             </p>

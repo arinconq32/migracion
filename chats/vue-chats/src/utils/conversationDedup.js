@@ -63,5 +63,20 @@ export function dedupeConversationsByPhone(conversations = []) {
 }
 
 export function dedupeConversationsByPhonePerEstado(conversations = []) {
-  return dedupeConversationsByPhone(conversations);
+  const map = new Map();
+
+  for (const conv of conversations) {
+    const phoneKey = conversationPhoneKey(conv);
+    const estado = String(conv.estado || "").toLowerCase();
+    const key = phoneKey
+      ? `phone:${phoneKey}:${estado}`
+      : `id:${conv.id ?? conv._id}`;
+    const existing = map.get(key);
+
+    if (!existing || isConversationNewer(conv, existing)) {
+      map.set(key, conv);
+    }
+  }
+
+  return [...map.values()];
 }

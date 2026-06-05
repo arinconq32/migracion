@@ -10,20 +10,51 @@ const getSocketUserId = (socket) =>
   socket?.data?.userId || socket?.data?.exten || null;
 
 const {
-  dedupeConversationsByPhone,
+  dedupeConversationsByPhonePerEstado,
 } = require("../utils/conversationDedup");
 
-const getState = async (userId) => {
+const getState = async (userId, options = {}) => {
+  const includeMessages = options.includeMessages === true;
   if (!chatModelInstance) {
     console.error("Error: chatModelInstance not set in chatUtils.");
     return { activos: [], nuevos: [], cerrados: [] };
+  }
+
+  if (typeof chatModelInstance.getVisibleQueueState === "function") {
+    const visible = await chatModelInstance.getVisibleQueueState(userId);
+    const activos = visible.activos || [];
+    const nuevos = visible.nuevos || [];
+    const cerrados = visible.cerrados || [];
+
+    if (options.log !== false) {
+      console.log(`🔍 getState para usuario ${userId}:`);
+      console.log(
+        `   - Activos: ${activos.length} → IDs: [${activos.map((conversation) => conversation.id).join(",")}]`,
+      );
+      console.log(
+        `   - Cerrados: ${cerrados.length} → IDs: [${cerrados.map((conversation) => conversation.id).join(",")}]`,
+      );
+      console.log(
+        `   - Nuevos: ${nuevos.length} → IDs: [${nuevos.map((conversation) => conversation.id).join(",")}]`,
+      );
+    }
+
+    if (includeMessages) {
+      for (const conversation of [...activos, ...nuevos, ...cerrados]) {
+        conversation.messages = await chatModelInstance.getMensajes(
+          conversation.id,
+        );
+      }
+    }
+
+    return { activos, nuevos, cerrados };
   }
 
   const activosRaw = await chatModelInstance.getConversaciones(userId, "abierta");
   const cerradosRaw = await chatModelInstance.getConversaciones(userId, "cerrada");
   const nuevosRaw = await chatModelInstance.getPendientes();
 
-  const deduped = dedupeConversationsByPhone([
+  const deduped = dedupeConversationsByPhonePerEstado([
     ...activosRaw,
     ...cerradosRaw,
     ...nuevosRaw,
@@ -33,27 +64,40 @@ const getState = async (userId) => {
   const nuevos = deduped.filter((c) => c.estado === "nuevo");
   const cerrados = deduped.filter((c) => c.estado === "cerrada");
 
-  console.log(`🔍 getState para usuario ${userId}:`);
-  console.log(
-    `   - Activos: ${activos.length} → IDs: [${activos.map((conversation) => conversation.id).join(",")}]`,
-  );
-  console.log(
-    `   - Cerrados: ${cerrados.length} → IDs: [${cerrados.map((conversation) => conversation.id).join(",")}]`,
-  );
-  console.log(
-    `   - Nuevos: ${nuevos.length} → IDs: [${nuevos.map((conversation) => conversation.id).join(",")}]`,
-  );
-
-  for (const conversation of deduped) {
-    conversation.messages = await chatModelInstance.getMensajes(
-      conversation.id,
+  if (options.log !== false) {
+    console.log(`🔍 getState para usuario ${userId}:`);
+    console.log(
+      `   - Activos: ${activos.length} → IDs: [${activos.map((conversation) => conversation.id).join(",")}]`,
     );
+    console.log(
+      `   - Cerrados: ${cerrados.length} → IDs: [${cerrados.map((conversation) => conversation.id).join(",")}]`,
+    );
+    console.log(
+      `   - Nuevos: ${nuevos.length} → IDs: [${nuevos.map((conversation) => conversation.id).join(",")}]`,
+    );
+  }
+
+  if (includeMessages) {
+    for (const conversation of deduped) {
+      conversation.messages = await chatModelInstance.getMensajes(
+        conversation.id,
+      );
+    }
   }
 
   return { activos, nuevos, cerrados };
 };
 
-const broadcast = async () => {
+function emitStateToUserSockets(userId, state) {
+  if (!ioInstance) return;
+  for (const socket of ioInstance.sockets.sockets.values()) {
+    const uid = getSocketUserId(socket);
+    if (!uid || String(uid) !== String(userId)) continue;
+    socket.emit("update_queues", state);
+  }
+}
+
+const broadcast = async (options = {}) => {
   if (!ioInstance || !chatModelInstance) {
     console.error(
       "Error: ioInstance or chatModelInstance not set in chatUtils.",
@@ -61,15 +105,34 @@ const broadcast = async () => {
     return;
   }
 
+  const users = new Set();
   for (const socket of ioInstance.sockets.sockets.values()) {
     const uid = getSocketUserId(socket);
-    if (!uid) {
-      continue;
-    }
-
-    const state = await getState(uid);
-    socket.emit("update_queues", state);
+    if (uid) users.add(String(uid));
   }
+
+  await Promise.all(
+    [...users].map(async (uid) => {
+      const state = await getState(uid, {
+        includeMessages: options.includeMessages === true,
+        log: options.log !== false,
+      });
+      emitStateToUserSockets(uid, state);
+    }),
+  );
+};
+
+const broadcastForUser = async (userId, options = {}) => {
+  if (!chatModelInstance) return null;
+  const uid = String(userId || "").trim();
+  if (!uid) return null;
+
+  const state = await getState(uid, {
+    includeMessages: options.includeMessages === true,
+    log: false,
+  });
+  emitStateToUserSockets(uid, state);
+  return state;
 };
 
 const assignNext = async (uid) => {
@@ -129,6 +192,8 @@ module.exports = {
   setInstances,
   getState,
   broadcast,
+  broadcastForUser,
+  emitStateToUserSockets,
   assignNext,
   broadcastEtiquetasCatalog,
 };

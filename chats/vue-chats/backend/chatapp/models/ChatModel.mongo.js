@@ -9,7 +9,9 @@ const redisClient = require("../config/redis");
 const { safeGet, safeSet, safeDel } = redisClient;
 const mongoose = require("mongoose");
 const {
+  conversationPhoneKey,
   dedupeConversationsByPhone,
+  dedupeConversationsByPhonePerEstado,
   isConversationNewer,
 } = require("../utils/conversationDedup");
 const { extractMessageMediaUrl: extractMediaUrlBackend } = require("../utils/messageMedia");
@@ -581,16 +583,197 @@ class ChatModelMongo {
     }
   }
 
-  async countActiveConversations(agenteId) {
-    const agenteIdNum = Number(agenteId);
-    const agenteFilter = Number.isFinite(agenteIdNum)
-      ? { $in: [agenteId, agenteIdNum, String(agenteIdNum)] }
-      : agenteId;
+  isInconsistentAbierta(conv = {}) {
+    return (
+      String(conv.estado || "").toLowerCase() === "abierta" && Boolean(conv.fin)
+    );
+  }
 
-    return Conversation.countDocuments({
+  isSupersededActiveConversation(abierta, cerradosRaw = []) {
+    const phoneKey = conversationPhoneKey(abierta);
+    if (!phoneKey) return false;
+
+    const abiertaId = String(abierta.id ?? abierta._id ?? "");
+    const abiertaInicio = new Date(abierta.inicio || 0).getTime();
+    if (!Number.isFinite(abiertaInicio) || abiertaInicio <= 0) {
+      return false;
+    }
+
+    return cerradosRaw.some((cerrada) => {
+      const cerradaId = String(cerrada.id ?? cerrada._id ?? "");
+      if (cerradaId && cerradaId === abiertaId) return false;
+      if (conversationPhoneKey(cerrada) !== phoneKey) return false;
+
+      const cerradaInicio = new Date(cerrada.inicio || 0).getTime();
+      if (!Number.isFinite(cerradaInicio) || cerradaInicio <= abiertaInicio) {
+        return false;
+      }
+
+      const cerradaFin = new Date(
+        cerrada.fin || cerrada.ultima_actividad || 0,
+      ).getTime();
+      return Number.isFinite(cerradaFin) && cerradaFin >= cerradaInicio;
+    });
+  }
+
+  async getVisibleQueueState(agenteId) {
+    const activosRaw = await this.getConversaciones(agenteId, "abierta");
+    const cerradosRaw = await this.getConversaciones(agenteId, "cerrada");
+    const nuevosRaw = await this.getPendientes();
+
+    const deduped = dedupeConversationsByPhonePerEstado([
+      ...activosRaw,
+      ...cerradosRaw,
+      ...nuevosRaw,
+    ]);
+
+    const activos = deduped
+      .filter((conversation) => conversation.estado === "abierta")
+      .filter((conversation) => !this.isInconsistentAbierta(conversation))
+      .filter(
+        (conversation) =>
+          !this.isSupersededActiveConversation(conversation, cerradosRaw),
+      );
+
+    return {
+      activos,
+      nuevos: deduped.filter((conversation) => conversation.estado === "nuevo"),
+      cerrados: deduped.filter((conversation) => conversation.estado === "cerrada"),
+    };
+  }
+
+  async invalidateAgentConversationCaches(agenteId) {
+    const uid = String(agenteId || "").trim();
+    if (!uid) return;
+    await safeDel([
+      `conversaciones:${uid}`,
+      `conversaciones:${uid}:abierta`,
+      `conversaciones:${uid}:cerrada`,
+      `activeConversations:${uid}`,
+    ]);
+  }
+
+  async countActiveConversations(agenteId) {
+    const { activos } = await this.getVisibleQueueState(agenteId);
+    return activos.length;
+  }
+
+  async reconcileInconsistentAbierta(agenteId) {
+    const uid = String(agenteId || "").trim();
+    if (!uid) return 0;
+
+    const db = mongoose.connection.db;
+    const agenteFilter = this.buildAgentIdFilter(uid);
+    if (!agenteFilter) return 0;
+
+    const broken = await db.collection("conversaciones").find({
       $or: [{ agenteId: agenteFilter }, { agente_id: agenteFilter }],
       estado: "abierta",
-    });
+      fin: { $exists: true, $ne: null },
+    }).toArray();
+
+    let fixed = 0;
+    for (const conv of broken) {
+      await db.collection("conversaciones").updateOne(
+        { _id: conv._id },
+        {
+          $unset: { fin: "" },
+          $set: { ultima_actividad: new Date() },
+        },
+      );
+      fixed += 1;
+    }
+
+    if (fixed > 0) {
+      await this.invalidateAgentConversationCaches(uid);
+      console.log(
+        `🔧 Agente ${uid}: reparadas ${fixed} conversación(es) abierta(s) con fin residual en BD`,
+      );
+    }
+
+    return fixed;
+  }
+
+  async reconcileStaleInactiveAbierta(agenteId, runtimeService = null) {
+    const uid = String(agenteId || "").trim();
+    if (!uid) return 0;
+
+    const staleMinutes = Number(process.env.ACTIVE_STALE_MINUTES || 60);
+    const staleMs = staleMinutes * 60 * 1000;
+    const liveIds =
+      typeof runtimeService?.getLiveConversationIds === "function"
+        ? runtimeService.getLiveConversationIds(uid)
+        : new Set();
+
+    const activosRaw = await this.getConversaciones(uid, "abierta");
+    let closed = 0;
+
+    for (const conv of activosRaw) {
+      const convId = String(conv.id || "");
+      if (!convId || liveIds.has(convId)) continue;
+
+      const lastTs = new Date(
+        conv.ultima_actividad || conv.inicio || 0,
+      ).getTime();
+      if (!Number.isFinite(lastTs) || Date.now() - lastTs < staleMs) continue;
+
+      await this.updateConversationState(conv.id, "cerrada", uid, false, {
+        tipificacion: "Cierre automático (inactiva en BD)",
+      });
+      closed += 1;
+    }
+
+    if (closed > 0) {
+      await this.invalidateAgentConversationCaches(uid);
+      console.log(
+        `🔧 Agente ${uid}: cerradas ${closed} conversación(es) activas inactivas en BD`,
+      );
+    }
+
+    return closed;
+  }
+
+  async repairActiveConversations(agenteId) {
+    const uid = String(agenteId || "").trim();
+    if (!uid) return { activos: [], reconciled: 0 };
+
+    const reconciled =
+      (await this.reconcileInconsistentAbierta(uid)) +
+      (await this.reconcileOrphanedActiveConversations(uid));
+
+    const state = await this.getVisibleQueueState(uid);
+    return { ...state, reconciled };
+  }
+
+  async syncActiveConversations(agenteId) {
+    return this.repairActiveConversations(agenteId);
+  }
+
+  async reconcileOrphanedActiveConversations(agenteId) {
+    const uid = String(agenteId || "").trim();
+    if (!uid) return 0;
+
+    const activosRaw = await this.getConversaciones(uid, "abierta");
+    const cerradosRaw = await this.getConversaciones(uid, "cerrada");
+
+    let closed = 0;
+    for (const conv of activosRaw) {
+      if (!this.isSupersededActiveConversation(conv, cerradosRaw)) continue;
+
+      await this.updateConversationState(conv.id, "cerrada", uid, false, {
+        tipificacion: "Cierre automático (conversación superada)",
+      });
+      closed += 1;
+    }
+
+    if (closed > 0) {
+      await this.invalidateAgentConversationCaches(uid);
+      console.log(
+        `🔧 Agente ${uid}: cerradas ${closed} conversación(es) abierta(s) huérfanas en BD`,
+      );
+    }
+
+    return closed;
   }
 
   async getNextPendingConversation(agentId = null) {
@@ -627,6 +810,28 @@ class ChatModelMongo {
       throw new Error(`Conversación no encontrada: ${convId}`);
     }
 
+    const normalizedAgent = String(agenteId || conv.agenteId || conv.agente_id || "").trim();
+    const currentEstado = String(conv.estado || "").toLowerCase();
+    const nextEstado = String(estado || "").toLowerCase();
+    const alreadyOpenForAgent =
+      currentEstado === "abierta" &&
+      normalizedAgent &&
+      String(conv.agenteId || conv.agente_id || "").trim() === normalizedAgent;
+
+    if (
+      nextEstado === "abierta" &&
+      abrir &&
+      normalizedAgent &&
+      !alreadyOpenForAgent
+    ) {
+      const active = await this.countActiveConversations(normalizedAgent);
+      const maxActive = Number(process.env.MAX_ACTIVE_CONVERSATIONS || 3);
+      if (active >= maxActive) {
+        const error = new Error("ACTIVE_LIMIT_REACHED");
+        throw error;
+      }
+    }
+
     const update = {
       estado,
       ultima_actividad: new Date(),
@@ -637,7 +842,15 @@ class ChatModelMongo {
       update.agente_id = agenteId;
     }
 
-    if (estado === "cerrada") {
+    const unset = {};
+    if (nextEstado === "abierta") {
+      unset.fin = "";
+      if (currentEstado === "cerrada") {
+        update.inicio = new Date();
+      }
+    }
+
+    if (nextEstado === "cerrada") {
       update.fin = new Date();
       if (extra.tipificacion) {
         update.tipificacion = {
@@ -645,18 +858,34 @@ class ChatModelMongo {
           desc: extra.tipificacion,
           observacion: extra.observaciones ?? "",
         };
+        update.tipificaciones = extra.tipificacion;
+        update.motivo_cierre = extra.tipificacion;
       }
       if (extra.observaciones) update.observaciones = extra.observaciones;
-      if (extra.idTipificacion != null) update.id_tipificacion = extra.idTipificacion;
+      if (extra.idTipificacion != null) {
+        update.id_tipificacion = extra.idTipificacion;
+        update.id_motivo_cierre = extra.idTipificacion;
+      }
       if (extra.idObservaciones != null) {
         update.id_observaciones = extra.idObservaciones;
       }
     }
 
     const db = mongoose.connection.db;
-    await db
-      .collection("conversaciones")
-      .updateOne({ _id: conv._id }, { $set: update });
+    const updateOp = { $set: update };
+    if (Object.keys(unset).length > 0) {
+      updateOp.$unset = unset;
+    }
+
+    await db.collection("conversaciones").updateOne({ _id: conv._id }, updateOp);
+
+    const agentKey = String(
+      agenteId || conv.agenteId || conv.agente_id || "",
+    ).trim();
+    if (agentKey) {
+      await this.invalidateAgentConversationCaches(agentKey);
+    }
+    await safeDel([`conversaciones:all`, `mensajes:${convId}`]);
   }
 
   // Obtener mensajes de una conversación (opcionalmente validando agente)

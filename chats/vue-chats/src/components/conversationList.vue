@@ -515,8 +515,10 @@ async function reabrirConversacion(conversation) {
   if (!conversation?.id) return;
 
   const uid = obtenerAgenteIdActual();
+  const convId = String(conversation.id);
+
   try {
-    const respuesta = await abrirChat(conversation.id, uid);
+    const respuesta = await abrirChat(convId, uid);
     const failed =
       respuesta?.ok === false ||
       respuesta?.success === false ||
@@ -528,19 +530,19 @@ async function reabrirConversacion(conversation) {
         respuesta?.message ||
         "No se pudo reabrir la conversacion.";
       console.error("Error reabriendo conversacion:", message, respuesta);
-      alert(message);
+      await showError(message);
       return;
     }
 
-    // Actualizacion optimista: el backend tambien propaga update_queues.
+    store.markConversationOpened(convId);
     store.upsertConversation({
       ...conversation,
       estado: "abierta",
     });
-    selectConversation(conversation.id);
+    selectConversation(convId);
   } catch (error) {
     console.error("Error reabriendo conversacion:", error);
-    alert("No se pudo reabrir la conversacion.");
+    await showError("No se pudo reabrir la conversacion.");
   }
 }
 

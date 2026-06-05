@@ -5,7 +5,11 @@ import {
   findContactFromLookup,
   resolveConversationDisplayName,
 } from "@/utils/contactDisplay";
-import { dedupeConversationsByPhone, conversationPhoneKey } from "@/utils/conversationDedup";
+import {
+  dedupeConversationsByPhone,
+  dedupeConversationsByPhonePerEstado,
+  conversationPhoneKey,
+} from "@/utils/conversationDedup";
 import { extractMessageMediaUrl } from "@/utils/messageMedia";
 
 const INTERNAL_CONV_PREFIX = "internal:";
@@ -193,6 +197,9 @@ export const useChatStore = defineStore("chat", () => {
   const noLeidosInternosPorPeer = ref({});
   const ultimoInternoPorPeer = ref({});
   const internoListaVisible = ref(false);
+  const activeCountDb = ref(0);
+  const maxActiveConversations = ref(3);
+  const activeConversationIdsDb = ref([]);
 
   const totalNoLeidosInternos = computed(() =>
     Object.values(noLeidosInternosPorPeer.value).reduce(
@@ -206,21 +213,27 @@ export const useChatStore = defineStore("chat", () => {
   );
 
   const activos = computed(() => {
-    return dedupeConversationsByPhone(Object.values(conversaciones.value)).filter(
-      (c) => c.estado === "abierta",
-    );
+    return dedupeConversationsByPhonePerEstado(
+      Object.values(conversaciones.value),
+    ).filter((c) => c.estado === "abierta");
+  });
+
+  const activeCountSynced = computed(() => {
+    const uiCount = activos.value.length;
+    const dbCount = Number(activeCountDb.value || 0);
+    return Math.max(uiCount, dbCount);
   });
 
   const nuevos = computed(() => {
-    return dedupeConversationsByPhone(Object.values(conversaciones.value)).filter(
-      (c) => c.estado === "nuevo",
-    );
+    return dedupeConversationsByPhonePerEstado(
+      Object.values(conversaciones.value),
+    ).filter((c) => c.estado === "nuevo");
   });
 
   const cerrados = computed(() => {
-    return dedupeConversationsByPhone(Object.values(conversaciones.value)).filter(
-      (c) => c.estado === "cerrada",
-    );
+    return dedupeConversationsByPhonePerEstado(
+      Object.values(conversaciones.value),
+    ).filter((c) => c.estado === "cerrada");
   });
 
   const conversacionActiva = computed(() => {
@@ -308,7 +321,7 @@ export const useChatStore = defineStore("chat", () => {
     const nextMap = { ...conversaciones.value };
 
     const applyQueue = (items, estado) => {
-      for (const c of dedupeConversationsByPhone(items)) {
+      for (const c of dedupeConversationsByPhonePerEstado(items)) {
         const normalized = normalizeConversation({ ...c, estado });
         if (!normalized.id) continue;
 
@@ -337,7 +350,7 @@ export const useChatStore = defineStore("chat", () => {
     applyQueue(stateNuevos, "nuevo");
     applyQueue(stateCerrados, "cerrada");
 
-    const winners = dedupeConversationsByPhone(Object.values(nextMap));
+    const winners = dedupeConversationsByPhonePerEstado(Object.values(nextMap));
     const prunedMap = {};
     for (const conv of winners) {
       if (conv?.id) prunedMap[conv.id] = nextMap[conv.id];
@@ -366,7 +379,20 @@ export const useChatStore = defineStore("chat", () => {
       conversacionActivaId.value = null;
     }
 
+    activeCountDb.value = winners.filter((conv) => conv.estado === "abierta").length;
     initialized.value = true;
+  };
+
+  const setActiveConversationCount = ({
+    count = 0,
+    max = 3,
+    activeIds = [],
+  } = {}) => {
+    activeCountDb.value = Math.max(0, Number(count) || 0);
+    maxActiveConversations.value = Math.max(1, Number(max) || 3);
+    activeConversationIdsDb.value = Array.isArray(activeIds)
+      ? activeIds.map((id) => String(id))
+      : [];
   };
 
   const enrichConversationsWithContactLookup = (lookup = {}) => {
@@ -528,15 +554,44 @@ export const useChatStore = defineStore("chat", () => {
     }
   };
 
-  const markConversationClosed = (convId) => {
+  const patchConversationState = (convId, estado) => {
     const id = normalizeConvId(convId);
-    if (!id || !conversaciones.value[id]) return;
+    if (!id || !conversaciones.value[id]) return false;
 
-    conversaciones.value[id].estado = "cerrada";
-    conversaciones.value[id].metadata = {
-      ...(conversaciones.value[id].metadata || {}),
-      estado: "cerrada",
+    const current = conversaciones.value[id];
+    conversaciones.value = {
+      ...conversaciones.value,
+      [id]: {
+        ...current,
+        estado,
+        metadata: {
+          ...(current.metadata || {}),
+          estado,
+        },
+      },
     };
+    return true;
+  };
+
+  const markConversationClosed = (convId, extra = {}) => {
+    const id = normalizeConvId(convId);
+    if (!id) return;
+
+    const existing = conversaciones.value[id] || null;
+    upsertConversation({
+      ...(existing || {}),
+      ...extra,
+      id,
+      estado: "cerrada",
+    });
+
+    if (conversacionActivaId.value === id) {
+      conversacionActivaId.value = null;
+    }
+  };
+
+  const markConversationOpened = (convId) => {
+    patchConversationState(convId, "abierta");
   };
 
   const setAgentesInternos = (list = []) => {
@@ -869,6 +924,11 @@ export const useChatStore = defineStore("chat", () => {
     conversacionActiva,
     mensajesActivos,
     activos,
+    activeCountDb,
+    maxActiveConversations,
+    activeConversationIdsDb,
+    activeCountSynced,
+    setActiveConversationCount,
     nuevos,
     cerrados,
     totalNoLeidos,
@@ -906,6 +966,7 @@ export const useChatStore = defineStore("chat", () => {
     patchMessage,
     setConversationMessages,
     markConversationClosed,
+    markConversationOpened,
     setEtiquetas,
     addEtiquetaCatalogo,
     removeEtiquetaCatalogo,

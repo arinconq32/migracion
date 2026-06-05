@@ -163,12 +163,12 @@ export function resolveConversationDisplayName(conv = {}, contact = null) {
 
   const resolved = pickDisplayName(
     [
-      contact?.nombre,
       conv.nombre,
       conv.name,
+      meta.nombre,
+      contact?.nombre,
       meta.nombreWhatsApp,
       meta.pushName,
-      meta.nombre,
       meta.profileName,
     ],
     telefono,

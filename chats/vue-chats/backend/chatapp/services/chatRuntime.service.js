@@ -15,6 +15,28 @@ class ChatRuntimeService {
     this.socketsByInternalAgent = new Map();
   }
 
+  getLiveConversationIds(agentKey) {
+    const normalized = this.normalizeAgentKey(agentKey);
+    const liveIds = new Set();
+
+    for (const [key, socketId] of this.connectedSockets.entries()) {
+      if (this.normalizeAgentKey(key) !== normalized) continue;
+      const socket = this.io?.sockets?.sockets?.get(socketId);
+      if (!socket) continue;
+
+      const currentConvId = String(socket.data?.currentConvId || "").trim();
+      if (currentConvId) liveIds.add(currentConvId);
+
+      for (const room of socket.rooms || []) {
+        if (room === socket.id) continue;
+        if (String(room).startsWith("internal-room-")) continue;
+        liveIds.add(String(room));
+      }
+    }
+
+    return liveIds;
+  }
+
   normalizeAgentKey(value) {
     if (value === null || value === undefined) return "";
     let normalized = String(value).trim().toLowerCase();
@@ -218,17 +240,18 @@ class ChatRuntimeService {
 
   async getAgentCapacity(agentKey) {
     const normalized = this.normalizeAgentKey(agentKey);
-    const memoryCount = this.agentRooms.get(normalized)?.size || 0;
+    if (typeof this.chatModel.repairActiveConversations === "function") {
+      await this.chatModel.repairActiveConversations(normalized);
+    }
     const modelCount =
       await this.chatModel.countActiveConversations(normalized);
-    const validated = Math.max(memoryCount, modelCount);
 
     return {
       agenteNormalizado: normalized,
-      salasActivasMemoria: memoryCount,
+      salasActivasMemoria: this.agentRooms.get(normalized)?.size || 0,
       cargaModelo: modelCount,
-      cargaValidada: validated,
-      puedeAceptar: validated < this.MAX_ACTIVE,
+      cargaValidada: modelCount,
+      puedeAceptar: modelCount < this.MAX_ACTIVE,
     };
   }
 

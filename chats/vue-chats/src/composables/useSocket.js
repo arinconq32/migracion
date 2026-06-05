@@ -106,6 +106,13 @@ export { isSocketConnected };
 export function emitSocket(eventName, data, callback) {
   if (!isSocketConnected.value) {
     console.warn(`Socket no conectado. No se puede emitir evento: ${eventName}`);
+    if (typeof callback === "function") {
+      callback({
+        ok: false,
+        success: false,
+        error: "Sin conexión al servidor. Recarga la página e intenta de nuevo.",
+      });
+    }
     return;
   }
   socket.value.emit(eventName, data, callback);
@@ -164,6 +171,14 @@ export function registrarListenersSocket(handlers = {}) {
 
   socket.value.on('init_state', (data) => {
     handlers.onInitState?.(data);
+  });
+
+  socket.value.on('conversation_state_changed', (data) => {
+    handlers.onConversationStateChanged?.(data);
+  });
+
+  socket.value.on('active_conversations_count', (data) => {
+    handlers.onActiveConversationsCount?.(data);
   });
 
   // Conversación asignada
