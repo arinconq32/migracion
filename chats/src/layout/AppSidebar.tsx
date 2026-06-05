@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { usePathname } from "next/navigation";
+import { useAuth } from "../context/AuthContext";
 import { useSidebar } from "../context/SidebarContext";
 import {
   BoxCubeIcon,
@@ -10,6 +11,7 @@ import {
   ChevronDownIcon,
   ChatIcon,
   PaperPlaneIcon,
+  PieChartIcon,
   TimeIcon,
   UserCircleIcon,
   HorizontaLDots,
@@ -29,7 +31,7 @@ type NavItem = {
   }[];
 };
 
-const navItems: NavItem[] = [
+const baseNavItems: NavItem[] = [
   {
     icon: <BoxCubeIcon />,
     name: "Administración Crm",
@@ -68,9 +70,22 @@ const navItems: NavItem[] = [
   },
 ];
 
+const adminNavItem: NavItem = {
+  icon: <PieChartIcon />,
+  name: "Reportes chats",
+  path: "/crm/reportes-chats",
+};
+
 const AppSidebar: React.FC = () => {
   const { isExpanded, isMobileOpen, isHovered, setIsHovered } = useSidebar();
+  const { isAdmin } = useAuth();
   const pathname = usePathname();
+  const navItems = React.useMemo(() => {
+    if (!isAdmin) return baseNavItems;
+    const items = [...baseNavItems];
+    items.splice(items.length - 1, 0, adminNavItem);
+    return items;
+  }, [isAdmin]);
 
   const renderMenuItems = (
     navItems: NavItem[],
@@ -244,7 +259,7 @@ const AppSidebar: React.FC = () => {
     });
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setOpenSubmenu(result);
-  }, [pathname, isActive]);
+  }, [pathname, isActive, navItems]);
 
   useEffect(() => {
     // Set the height of the submenu items when the submenu is opened

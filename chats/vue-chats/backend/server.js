@@ -7,6 +7,7 @@ require("dotenv").config({ path: require("path").resolve(__dirname, ".env") });
 
 const chatRoutes = require("./chatapp/routes/chat.routes");
 const usuarioRoutes = require("./chatapp/routes/usuario.routes");
+const authRoutes = require("./chatapp/routes/auth.routes");
 const contactMongoRoutes = require("./chatapp/routes/contact.mongo.routes");
 const conversationMongoRoutes = require("./chatapp/routes/conversation.mongo.routes");
 const mediaRoutes = require("./chatapp/routes/media.routes");
@@ -91,6 +92,7 @@ function bootWithModel(model, label) {
   app.use("/", uploadRoutes);
   app.use("/", chatRoutes);
   app.use("/api", usuarioRoutes);
+  app.use("/api/auth", authRoutes);
   app.use("/api/contacts", contactMongoRoutes);
   app.use("/api/conversations", conversationMongoRoutes);
   app.use("/api/media", mediaRoutes);

@@ -1,5 +1,6 @@
 "use client";
 
+import { useAuth } from "@/context/AuthContext";
 import { useEffect, useMemo } from "react";
 import { useSearchParams } from "next/navigation";
 
@@ -21,6 +22,7 @@ function buildEmbeddedChatUrl(base: string, agentId: string) {
 
 export default function ChatsPage() {
   const searchParams = useSearchParams();
+  const { user, loading } = useAuth();
 
   useEffect(() => {
     const pedirPermisoPadre = () => {
@@ -68,12 +70,24 @@ export default function ChatsPage() {
     const agentId =
       searchParams.get("agentId") ||
       searchParams.get("userId") ||
+      user?.agentId ||
       process.env.NEXT_PUBLIC_DEFAULT_AGENT_ID?.trim() ||
-      "413";
+      "";
+    if (!agentId) return "";
     const base =
       process.env.NEXT_PUBLIC_EMBEDDED_CHATS_URL || defaultEmbeddedChatUrl;
     return buildEmbeddedChatUrl(base, agentId);
-  }, [searchParams]);
+  }, [searchParams, user?.agentId]);
+
+  if (loading || !embeddedChatUrl) {
+    return (
+      <section className="-m-4 flex h-[calc(100dvh-80px)] items-center justify-center md:-m-6">
+        <p className="text-sm text-gray-500 dark:text-gray-400">
+          Cargando chats...
+        </p>
+      </section>
+    );
+  }
 
   return (
     <section className="-m-4 overflow-hidden md:-m-6">

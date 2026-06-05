@@ -4,4 +4,12 @@ async function getUsuarios() {
   return await UsuarioModel.getAllUsuarios();
 }
 
-module.exports = { getUsuarios };
+async function findByUsuario(usuario) {
+  return await UsuarioModel.findByUsuario(usuario);
+}
+
+async function touchUltimoLogin(userId, tokenSesion) {
+  return await UsuarioModel.touchUltimoLogin(userId, tokenSesion);
+}
+
+module.exports = { getUsuarios, findByUsuario, touchUltimoLogin };
