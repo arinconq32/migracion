@@ -28,6 +28,18 @@ import {
   esMensajeEntrante,
   textoVistaPreviaMensaje,
 } from "./useNotificaciones";
+import {
+  buildTransferInNotification,
+  buildTransferOutNotification,
+} from "@/utils/transferNotifications";
+import {
+  handleSupportQueueAvailable,
+  handleSupportRequestExpired,
+  handleSupportClientAlreadyAssigned,
+  handleSupportAssignedToOther,
+  handleSupportActiveLimit,
+  handleSupportAssignmentConfirmed,
+} from "./useSupportRequests";
 
 export { enrichConversationsWithContacts };
 
@@ -119,6 +131,13 @@ export function useChatSocket(userId = resolveAgentIdFromSources()) {
   iniciarSocket(userId, {
     onConnect: () => {
       console.log("[useChatSocket] Conectado al servidor");
+      const estadoGuardado = String(store.agentEstadoConexion || "Activo").trim();
+      if (estadoGuardado) {
+        emitSocket("cambiar_estado_agente", {
+          estado: estadoGuardado,
+          silent: true,
+        });
+      }
       emitSocket("request_active_conversations_count", { userId });
       registerInternalIdentity(userId);
       fetchInternalAgents((agentes) => store.setAgentesInternos(agentes));
@@ -157,11 +176,11 @@ export function useChatSocket(userId = resolveAgentIdFromSources()) {
       fetchInternalAgents((agentes) => store.setAgentesInternos(agentes));
     },
     onUpdateQueues: (data) => {
-      store.setQueueState(data);
+      store.setQueueState(data, { replace: true });
       void enrichConversationsWithContacts(store);
     },
     onInitState: (data) => {
-      store.setQueueState(data);
+      store.setQueueState(data, { replace: true });
       void enrichConversationsWithContacts(store);
     },
     onConversationStateChanged: ({ convId, estado, tipificacion } = {}) => {
@@ -220,6 +239,26 @@ export function useChatSocket(userId = resolveAgentIdFromSources()) {
     onChatAssigned: async (conv) => {
       store.upsertConversation(conv);
       await enrichConversationsWithContacts(store);
+      if (conv?.transferida) {
+        await syncConversations(true);
+      }
+    },
+    onConversationTransferred: (payload = {}) => {
+      const id = String(payload.convId || "").trim();
+      if (id) {
+        store.removeConversation(id);
+      }
+      store.addTransferNotification(buildTransferOutNotification(payload));
+      void syncConversations(true);
+    },
+    onConversationReceived: async (payload = {}) => {
+      const id = String(payload.convId || "").trim();
+      const mensajes = Array.isArray(payload.mensajes) ? payload.mensajes : [];
+      if (id && mensajes.length > 0) {
+        mensajes.forEach((msg) => store.addMessage(id, msg));
+      }
+      store.addTransferNotification(buildTransferInNotification(payload));
+      await syncConversations(true);
     },
     onChatTaken: ({ convId }) => {
       store.markConversationClosed(convId);
@@ -236,6 +275,13 @@ export function useChatSocket(userId = resolveAgentIdFromSources()) {
     onTipificaciones: (data) => {
       if (Array.isArray(data) && data.length > 0) store.setTipificaciones(data);
     },
+    onQueuesAvailable: (data) => handleSupportQueueAvailable(data, userId),
+    onAssignmentConfirmed: (data) =>
+      handleSupportAssignmentConfirmed(data, syncConversations),
+    onClientAlreadyAssigned: (data) => handleSupportClientAlreadyAssigned(data),
+    onSupportRequestExpired: (data) => handleSupportRequestExpired(data),
+    onSupportActiveLimit: (data) => handleSupportActiveLimit(data),
+    onSupportAssignedToOther: (data) => handleSupportAssignedToOther(data),
   });
 
   function sendMessage(convId, text) {

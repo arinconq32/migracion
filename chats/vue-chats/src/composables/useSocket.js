@@ -186,6 +186,14 @@ export function registrarListenersSocket(handlers = {}) {
     handlers.onChatAssigned?.(c);
   });
 
+  socket.value.on('conversacion_transferida', (data) => {
+    handlers.onConversationTransferred?.(data);
+  });
+
+  socket.value.on('conversacion_recibida', (data) => {
+    handlers.onConversationReceived?.(data);
+  });
+
   // Llamada entrante (videollamada)
   socket.value.on('signal', ({ offer, valor }) => {
     handlers.onIncomingCall?.({ offer, valor });
@@ -258,6 +266,18 @@ export function registrarListenersSocket(handlers = {}) {
   // Cliente ya asignado
   socket.value.on('cliente_ya_asignado', ({ from }) => {
     handlers.onClientAlreadyAssigned?.({ from });
+  });
+
+  socket.value.on('solicitud_expirada', (data) => {
+    handlers.onSupportRequestExpired?.(data);
+  });
+
+  socket.value.on('limite_conversaciones', (data) => {
+    handlers.onSupportActiveLimit?.(data);
+  });
+
+  socket.value.on('soporte_asignado', (data) => {
+    handlers.onSupportAssignedToOther?.(data);
   });
 
   // Mensaje de cliente (WhatsApp soporte)

@@ -4,7 +4,9 @@ class ChatRuntimeService {
     this.chatModel = chatModel;
     this.chatUtils = chatUtils;
     this.MAX_ACTIVE = maxActive;
-    this.TIEMPO_ESPERA_RESPUESTAS = 30000;
+    this.TIEMPO_ESPERA_RESPUESTAS = Number(
+      process.env.TIMEOUT_SOLICITUD_AGENTE || 30000,
+    );
     this.userSessions = new Map();
     this.pendingRequests = new Map();
     this.activeRooms = new Map();
@@ -131,7 +133,146 @@ class ChatRuntimeService {
     socket.data.userId = userId ? String(userId) : socket.data.userId || null;
     socket.data.exten = exten || socket.data.exten || null;
     socket.data.socketKeys = keys;
+    if (!socket.data.estadoConexion) {
+      socket.data.estadoConexion = "Activo";
+    }
     return keys;
+  }
+
+  isAgentAvailableForQueue(socket) {
+    if (!socket) return false;
+    const estado = String(socket.data?.estadoConexion || "Activo").trim();
+    const blocked = ["ocupado", "ausente", "sin conexion", "sin conexión"];
+    return !blocked.includes(estado.toLowerCase());
+  }
+
+  async resolveQueueAgents(cola, pausa) {
+    if (typeof this.chatModel.getQueueAgents === "function") {
+      const fromModel = await this.chatModel.getQueueAgents(
+        this.normalizeQueueName(cola),
+        pausa,
+        [],
+      );
+      if (Array.isArray(fromModel) && fromModel.length > 0) {
+        return fromModel;
+      }
+    }
+    return this.getConnectedQueueAgents(cola, pausa);
+  }
+
+  getConnectedQueueAgents(cola, pausa) {
+    if (Number(pausa) === 1) return [];
+
+    const targetQueue = this.normalizeQueueName(cola);
+    const seenSocketIds = new Set();
+    const agents = [];
+
+    for (const [, socketId] of this.connectedSockets.entries()) {
+      if (!socketId || seenSocketIds.has(socketId)) continue;
+
+      const socket = this.io.sockets.sockets.get(socketId);
+      if (!socket || !this.isAgentAvailableForQueue(socket)) continue;
+
+      const agentInterface = String(
+        socket.data.userId || socket.data.exten || "",
+      ).trim();
+      if (!agentInterface) continue;
+
+      seenSocketIds.add(socketId);
+      agents.push({
+        interface: agentInterface,
+        exten: String(socket.data.exten || agentInterface).trim(),
+        nombre: String(socket.data.nombreAgente || `Agente ${agentInterface}`),
+        estado: "online",
+        colas: targetQueue ? [targetQueue] : [],
+      });
+    }
+
+    return agents;
+  }
+
+  buildAgentStatusWhatsAppMessage(estado) {
+    const normalized = String(estado || "").trim().toLowerCase();
+    if (normalized === "activo") {
+      return "Tu asesor está disponible nuevamente para continuar contigo.";
+    }
+    if (normalized === "ocupado") {
+      return "Tu asesor se encuentra ocupado en este momento. Responderemos tan pronto como sea posible.";
+    }
+    if (normalized === "ausente") {
+      return "Tu asesor no está disponible por el momento. Hemos registrado tu mensaje y te contactaremos pronto.";
+    }
+    if (normalized === "sin conexion" || normalized === "sin conexión") {
+      return "Tu asesor no está conectado en este momento. Te responderemos cuando vuelva a estar en línea.";
+    }
+    return null;
+  }
+
+  async notifyActiveConversationsAgentStatus(agentKey, estado) {
+    const text = this.buildAgentStatusWhatsAppMessage(estado);
+    if (!text) {
+      return { ok: true, notified: 0 };
+    }
+
+    const normalized = this.normalizeAgentKey(agentKey);
+    const phones = new Set();
+
+    if (typeof this.chatModel.getConversaciones === "function") {
+      const activos = await this.chatModel.getConversaciones(normalized, "abierta");
+      for (const conv of activos || []) {
+        const phone = String(conv.telefono || conv.tels || "").trim();
+        if (phone) phones.add(phone);
+      }
+    }
+
+    const roomIds = this.agentRooms.get(normalized);
+    if (roomIds) {
+      for (const roomId of roomIds) {
+        const room = this.activeRooms.get(roomId);
+        const phone = String(room?.cliente || "").trim();
+        if (phone) phones.add(phone);
+      }
+    }
+
+    let notified = 0;
+    for (const phone of phones) {
+      const result = await this.sendWhatsAppMessage(phone, text, "text");
+      if (result?.success) notified += 1;
+    }
+
+    return { ok: true, notified, mensaje: text };
+  }
+
+  async handleAgentStatusChange(socket, estado, options = {}) {
+    const nextEstado = String(estado || "Activo").trim() || "Activo";
+    const previous = String(socket.data.estadoConexion || "Activo").trim();
+    const silent = Boolean(options?.silent);
+    socket.data.estadoConexion = nextEstado;
+
+    const agentKey = this.normalizeAgentKey(
+      socket.data.userId || socket.data.exten,
+    );
+    if (!agentKey) {
+      return { ok: false, error: "Agente no identificado" };
+    }
+
+    let notifyResult = { notified: 0 };
+    if (
+      !silent &&
+      previous.toLowerCase() !== nextEstado.toLowerCase()
+    ) {
+      notifyResult = await this.notifyActiveConversationsAgentStatus(
+        agentKey,
+        nextEstado,
+      );
+    }
+
+    return {
+      ok: true,
+      estado: nextEstado,
+      notified: notifyResult.notified || 0,
+      mensaje: notifyResult.mensaje || null,
+    };
   }
 
   unregisterSocketKeys(socketId) {
@@ -283,11 +424,7 @@ class ChatRuntimeService {
 
     this.saveSessionConfig(client, cola, pausa);
 
-    const available = await this.chatModel.getQueueAgents(
-      this.normalizeQueueName(cola),
-      pausa,
-      [],
-    );
+    const available = await this.resolveQueueAgents(cola, pausa);
     const agentes = await this.filterAgentsByCapacity(available);
     if (agentes.length === 0) {
       return false;
@@ -632,21 +769,86 @@ class ChatRuntimeService {
     }
 
     const endpoint = String(process.env.WHATSAPP_OUTBOUND_URL || "").trim();
-    if (!endpoint) {
-      console.log(`[mock-whatsapp] ${type} -> ${to}: ${text}`);
-      return {
-        success: true,
-        status_code: 200,
-        respuesta_api: { mocked: true },
-        payload_enviado: { to, type, text, datosAdicionales },
-      };
+    if (endpoint) {
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ to, type, text, datosAdicionales }),
+        });
+        const data = await response.json().catch(() => ({}));
+
+        return {
+          success: response.ok,
+          status_code: response.status,
+          respuesta_api: data,
+          payload_enviado: { to, type, text, datosAdicionales },
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error.message,
+          status_code: 500,
+          respuesta_api: null,
+          payload_enviado: { to, type, text, datosAdicionales },
+        };
+      }
     }
 
+    const gupshupResult = await this.sendWhatsAppViaGupshup(to, text, type);
+    if (gupshupResult) {
+      return gupshupResult;
+    }
+
+    console.log(`[mock-whatsapp] ${type} -> ${to}: ${text}`);
+    return {
+      success: true,
+      status_code: 200,
+      respuesta_api: { mocked: true },
+      payload_enviado: { to, type, text, datosAdicionales },
+    };
+  }
+
+  async sendWhatsAppViaGupshup(numeroDestino, mensaje, tipoMensaje = "text") {
+    const apiKey = String(
+      process.env.GUPSHUP_API_KEY ||
+        process.env.GUPSHUP_API_KEY_FINAL ||
+        "",
+    )
+      .trim()
+      .replace(/^Bearer\s+/i, "");
+    const source = String(process.env.GUPSHUP_SOURCE || "").trim();
+    const appName = String(process.env.GUPSHUP_APP_NAME || "app").trim();
+    if (!apiKey || !source) return null;
+
+    const destination = String(numeroDestino || "").replace(/\D/g, "");
+    if (!destination) {
+      return { success: false, error: "Número de destino inválido" };
+    }
+
+    const type = String(tipoMensaje || "text").trim().toLowerCase();
+    const text = String(mensaje || "").trim();
+    const messagePayload =
+      type === "text"
+        ? JSON.stringify({ type: "text", text })
+        : JSON.stringify({ type, text });
+
+    const body = new URLSearchParams({
+      channel: "whatsapp",
+      source,
+      destination,
+      "src.name": appName,
+      message: messagePayload,
+    });
+
     try {
-      const response = await fetch(endpoint, {
+      const response = await fetch("https://api.gupshup.io/wa/api/v1/msg", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ to, type, text, datosAdicionales }),
+        headers: {
+          apikey: apiKey,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: body.toString(),
       });
       const data = await response.json().catch(() => ({}));
 
@@ -654,7 +856,8 @@ class ChatRuntimeService {
         success: response.ok,
         status_code: response.status,
         respuesta_api: data,
-        payload_enviado: { to, type, text, datosAdicionales },
+        payload_enviado: { destination, type, text },
+        provider: "gupshup",
       };
     } catch (error) {
       return {
@@ -662,7 +865,7 @@ class ChatRuntimeService {
         error: error.message,
         status_code: 500,
         respuesta_api: null,
-        payload_enviado: { to, type, text, datosAdicionales },
+        provider: "gupshup",
       };
     }
   }
@@ -1080,6 +1283,307 @@ class ChatRuntimeService {
     socket.emit("etiquetas", await this.chatModel.getEtiquetas());
     socket.emit("motivosCierre", await this.chatModel.getMotivosCierre());
     socket.emit("tipificaciones", await this.chatModel.getTipificaciones());
+  }
+
+  findRoomByConvId(convId) {
+    const target = String(convId || "").trim();
+    if (!target) return null;
+    for (const room of this.activeRooms.values()) {
+      if (String(room.convId || "") === target) return room;
+    }
+    return null;
+  }
+
+  buildTransferMeta({
+    conv = {},
+    motivo = "",
+    desdeNombre = "",
+    haciaNombre = "",
+    desdeExten = "",
+    haciaExten = "",
+  } = {}) {
+    const contactoNombre = String(
+      conv.nombre || conv.nombreContacto || conv.name || "",
+    ).trim();
+    const telefono = String(conv.telefono || conv.tels || "").trim();
+    const motivoTexto = String(motivo || "").trim() || "Sin comentario";
+
+    return {
+      motivo: motivoTexto,
+      contactoNombre: contactoNombre || telefono || "Conversación",
+      telefono,
+      desdeNombre: String(desdeNombre || "").trim(),
+      haciaNombre: String(haciaNombre || "").trim(),
+      desdeExten: String(desdeExten || "").trim(),
+      haciaExten: String(haciaExten || "").trim(),
+    };
+  }
+
+  emitTransferNotifications({
+    origenSocket,
+    destinoSocket,
+    convId,
+    conv = {},
+    origen,
+    destino,
+    transferMeta = {},
+    salaId = null,
+    mensajes = [],
+  }) {
+    const meta = this.buildTransferMeta(transferMeta);
+    const contacto = meta.contactoNombre;
+
+    if (origenSocket) {
+      origenSocket.emit("conversacion_transferida", {
+        convId,
+        salaId,
+        hacia: destino,
+        haciaNombre: meta.haciaNombre,
+        haciaExten: meta.haciaExten,
+        telefono: meta.telefono,
+        contactoNombre: contacto,
+        motivo: meta.motivo,
+        mensaje: `Conversación transferida a ${meta.haciaNombre || destino}.`,
+      });
+    }
+
+    if (destinoSocket) {
+      destinoSocket.emit("chat_assigned", {
+        id: convId,
+        convId,
+        telefono: meta.telefono || conv.telefono || conv.tels || "",
+        nombre: contacto,
+        estado: "abierta",
+        salaId,
+        agente_id: destino,
+        agenteId: destino,
+        transferida: true,
+        transferOrigenId: origen,
+        agente_origen_exten: meta.desdeExten || null,
+        metadata: {
+          ...(conv.metadata || {}),
+          transferencias: Array.isArray(conv.metadata?.transferencias)
+            ? conv.metadata.transferencias
+            : [],
+        },
+      });
+      destinoSocket.emit("conversacion_recibida", {
+        convId,
+        salaId,
+        desde: origen,
+        desdeNombre: meta.desdeNombre,
+        desdeExten: meta.desdeExten,
+        telefono: meta.telefono,
+        contactoNombre: contacto,
+        motivo: meta.motivo,
+        mensajes: Array.isArray(mensajes) ? mensajes : [],
+        mensaje: `Recibes una conversación de ${meta.desdeNombre || origen}.`,
+      });
+    }
+  }
+
+  async notifyConversationTransfer({
+    convId,
+    conv = {},
+    agenteOrigen,
+    agenteDestino,
+    motivo = "",
+    desdeNombre = "",
+    haciaNombre = "",
+    desdeExten = "",
+    haciaExten = "",
+  }) {
+    const transferMeta = {
+      motivo,
+      desdeNombre,
+      haciaNombre,
+      desdeExten,
+      haciaExten,
+    };
+
+    const room = this.findRoomByConvId(convId);
+    if (room) {
+      return this.transferActiveRoom({
+        convId,
+        agenteOrigen,
+        agenteDestino,
+        ...transferMeta,
+      });
+    }
+
+    const origen = this.normalizeAgentKey(agenteOrigen);
+    const destino = this.normalizeAgentKey(agenteDestino);
+    if (!destino) {
+      return { ok: false, error: "Agente destino inválido" };
+    }
+
+    this.emitTransferNotifications({
+      origenSocket: this.getSocketByAgent(origen),
+      destinoSocket: this.getSocketByAgent(destino),
+      convId,
+      conv,
+      origen,
+      destino,
+      transferMeta,
+      mensajes: [],
+    });
+
+    return { ok: true, notified: true };
+  }
+
+  async transferActiveRoom({
+    convId,
+    agenteOrigen,
+    agenteDestino,
+    motivo = "",
+    desdeNombre = "",
+    haciaNombre = "",
+    desdeExten = "",
+    haciaExten = "",
+  }) {
+    const room = this.findRoomByConvId(convId);
+    if (!room) {
+      return { ok: false, error: "Sala activa no encontrada" };
+    }
+
+    const origen = this.normalizeAgentKey(agenteOrigen || room.agente);
+    const destino = this.normalizeAgentKey(agenteDestino);
+    if (!destino) {
+      return { ok: false, error: "Agente destino inválido" };
+    }
+
+    const origenRooms = this.agentRooms.get(origen);
+    if (origenRooms) origenRooms.delete(room.id);
+
+    room.agente = destino;
+    room.agenteId = destino;
+
+    if (!this.agentRooms.has(destino)) {
+      this.agentRooms.set(destino, new Set());
+    }
+    this.agentRooms.get(destino).add(room.id);
+
+    const origenSocket = this.getSocketByAgent(origen);
+    const destinoSocket = this.getSocketByAgent(destino);
+
+    if (origenSocket) {
+      origenSocket.leave(room.id);
+    }
+
+    if (destinoSocket) {
+      destinoSocket.join(room.id);
+      room.socketAgente = destinoSocket.id;
+    }
+
+    this.emitTransferNotifications({
+      origenSocket,
+      destinoSocket,
+      convId: room.convId,
+      conv: {
+        telefono: room.cliente,
+        nombre: room.nombre || room.cliente,
+      },
+      origen,
+      destino,
+      transferMeta: {
+        motivo,
+        desdeNombre,
+        haciaNombre,
+        desdeExten,
+        haciaExten,
+      },
+      salaId: room.id,
+      mensajes: room.mensajes,
+    });
+
+    const systemText = `Conversación transferida de ${origen} a ${destino}.`;
+    const systemMessage = {
+      id: `sys_transfer_${Date.now()}`,
+      conversacion_id: room.convId,
+      convId: room.convId,
+      emisor: "sistema",
+      mensaje: systemText,
+      text: systemText,
+      tipo: "sistema",
+      origen: "interno",
+      timestamp: Date.now(),
+    };
+
+    await this.chatModel.insertMessage(
+      room.convId,
+      "sistema",
+      systemText,
+      "sistema",
+      systemMessage,
+    );
+    room.mensajes.push(systemMessage);
+
+    if (destinoSocket) {
+      destinoSocket.emit("chat_message", {
+        convId: room.convId,
+        msg: systemMessage,
+      });
+    }
+
+    return { ok: true };
+  }
+
+  async sendSupervisorMessage({
+    convId,
+    mensaje,
+    supervisorId,
+    agenteId,
+    cliente,
+  }) {
+    const text = String(mensaje || "").trim();
+    if (!text) {
+      return { ok: false, error: "Mensaje vacío" };
+    }
+
+    const room = this.findRoomByConvId(convId);
+    const agenteKey = String(
+      agenteId || room?.agente || room?.agenteId || "",
+    ).trim();
+    const messageId = await this.chatModel.insertMessage(
+      convId,
+      "agente",
+      text,
+      "texto",
+      { origen: "supervisor", emisor_exten: agenteKey || supervisorId },
+    );
+
+    const outgoing = {
+      id: messageId,
+      conversacion_id: convId,
+      convId,
+      emisor: "agente",
+      mensaje: text,
+      text,
+      tipo: "texto",
+      timestamp: Date.now(),
+      origen: "supervisor",
+    };
+
+    if (room) {
+      room.mensajes.push(outgoing);
+      const agentSocket = this.io.sockets.sockets.get(room.socketAgente);
+      if (agentSocket) {
+        agentSocket.emit("chat_message", { convId, msg: outgoing });
+        agentSocket.emit("mensaje_supervisor", {
+          convId,
+          salaId: room.id,
+          mensaje: text,
+          supervisorId,
+        });
+      }
+    }
+
+    const phone = String(cliente || room?.cliente || "").trim();
+    if (phone) {
+      await this.sendWhatsAppMessage(phone, text, "text");
+    }
+
+    return { ok: true, messageId, message: outgoing };
   }
 }
 

@@ -104,6 +104,9 @@ class ChatModelMongo {
       origen: item.origen,
       salaId: item.salaId || item.sala_id,
       cola: item.cola,
+      agente_origen_exten: item.agente_origen_exten || null,
+      agente_destino_exten: item.agente_destino_exten || null,
+      metadata: item.metadata || {},
       mensajes: Array.isArray(item.mensajes)
         ? item.mensajes.map((message) => this.normalizeMessage(message))
         : item.mensajes,
@@ -350,6 +353,93 @@ class ChatModelMongo {
     return [...variants];
   }
 
+  async getAgentDisplayName(agentRef) {
+    const id = String(agentRef || "").trim();
+    if (!id) return "Agente";
+
+    const lookup = await this.buildAgentNameLookup();
+    const label = lookup.get(id) || lookup.get(String(Number(id)));
+    if (label) return label.split(" (ext.")[0].trim() || label;
+
+    return id;
+  }
+
+  async getQueueAgents(colaFinal, pausaFinal, agentesOcupados = []) {
+    void colaFinal;
+    void pausaFinal;
+    void agentesOcupados;
+    return [];
+  }
+
+  async buildAgentNameLookup() {
+    const lookup = new Map();
+    try {
+      const UsuarioModel = require("./UsuarioModel.mysql");
+      const usuarios = await UsuarioModel.getAllUsuarios();
+      for (const user of usuarios) {
+        const nombre = String(user.nombre || user.usuario || "").trim();
+        if (!nombre) continue;
+        const exten = String(user.exten || "").trim();
+        const label =
+          exten && exten !== "undefined" ? `${nombre} (ext. ${exten})` : nombre;
+        [user.id, user._id, user.exten, user.usuario].forEach((key) => {
+          const value = String(key || "").trim();
+          if (!value || value === "undefined") return;
+          lookup.set(value, label);
+          const numeric = Number(value);
+          if (Number.isFinite(numeric)) {
+            lookup.set(String(numeric), label);
+          }
+        });
+      }
+    } catch (_) {
+      // sin nombres de agente
+    }
+    return lookup;
+  }
+
+  resolveAgentLabel(lookup, agentId) {
+    const id = String(agentId || "").trim();
+    if (!id) return "-";
+    return lookup.get(id) || lookup.get(String(Number(id))) || id;
+  }
+
+  buildHistoryTransferenciasList(row, lookup) {
+    const transferencias = Array.isArray(row?.metadata?.transferencias)
+      ? row.metadata.transferencias
+      : [];
+    if (!transferencias.length) return [];
+
+    return transferencias.map((transfer) => {
+      const ts = this.toHistoryTimestamp(transfer?.fecha);
+      const desde = this.resolveAgentLabel(lookup, transfer?.desde);
+      const hacia = this.resolveAgentLabel(lookup, transfer?.hacia);
+      const motivo = String(transfer?.motivo || transfer?.comentario || "").trim();
+
+      return {
+        fecha: ts,
+        desde,
+        hacia,
+        motivo: motivo || "Sin comentario",
+        ordenTs: ts,
+      };
+    });
+  }
+
+  buildHistoryConversationsById(convRows = []) {
+    const map = new Map();
+    for (const row of convRows) {
+      const ref = String(row?._id || "").trim();
+      if (ref) map.set(ref, row);
+    }
+    return map;
+  }
+
+  resolveHistoryTransferenciasForConversation(convRow, lookup) {
+    if (!convRow) return [];
+    return this.buildHistoryTransferenciasList(convRow, lookup);
+  }
+
   async findContactForHistory({ contactoId, telefono, dni }) {
     const db = mongoose.connection.db;
     const contactosCol = db.collection("contactos");
@@ -472,6 +562,9 @@ class ChatModelMongo {
         .limit(100)
         .toArray();
 
+      const agentLookup = await this.buildAgentNameLookup();
+      const conversationsById = this.buildHistoryConversationsById(convRows);
+
       const registrosConv = convRows.map((row) => {
           const ts = this.toHistoryTimestamp(
             row.fin || row.inicio || row.ultima_actividad,
@@ -495,6 +588,10 @@ class ChatModelMongo {
             conversacion: convLabel,
             conversacionRef: convRef || convLabel,
             ordenTs: ts,
+            transferencias: this.resolveHistoryTransferenciasForConversation(
+              row,
+              agentLookup,
+            ),
           };
         });
 
@@ -542,11 +639,18 @@ class ChatModelMongo {
         for (const linked of linkedConvs) {
           const ref = String(linked._id || "");
           if (!ref) continue;
+          conversationsById.set(ref, linked);
           if (linked.legacyId !== undefined && linked.legacyId !== null) {
-            convRefByIdConv.set(String(linked.legacyId), ref);
+            const legacyKey = String(linked.legacyId).trim();
+            if (legacyKey && !convRefByIdConv.has(legacyKey)) {
+              convRefByIdConv.set(legacyKey, ref);
+            }
           }
           if (linked.id !== undefined && linked.id !== null) {
-            convRefByIdConv.set(String(linked.id), ref);
+            const idKey = String(linked.id).trim();
+            if (idKey && !convRefByIdConv.has(idKey)) {
+              convRefByIdConv.set(idKey, ref);
+            }
           }
         }
       }
@@ -555,6 +659,9 @@ class ChatModelMongo {
         const ts = this.toHistoryTimestamp(row.fecha);
         const idConv = String(row.idConv || "-");
         const convRef = convRefByIdConv.get(idConv) || null;
+        const linkedConversation = convRef
+          ? conversationsById.get(convRef) || null
+          : null;
         return {
           data: row.data || contactoId || persona.data || "-",
           fecha: ts,
@@ -569,6 +676,10 @@ class ChatModelMongo {
           conversacion: idConv,
           conversacionRef: convRef,
           ordenTs: ts,
+          transferencias: this.resolveHistoryTransferenciasForConversation(
+            linkedConversation,
+            agentLookup,
+          ),
         };
       });
 
@@ -627,10 +738,9 @@ class ChatModelMongo {
   async getVisibleQueueState(agenteId) {
     const activosRaw = await this.getConversaciones(agenteId, "abierta");
     const cerradosRaw = await this.getConversaciones(agenteId, "cerrada");
-    const nuevosRaw = dedupeConversationsByPhonePerEstado([
-      ...(await this.getPendientes()),
-      ...(agenteId ? await this.getConversaciones(agenteId, "nuevo") : []),
-    ]);
+    const nuevosRaw = agenteId
+      ? await this.getConversaciones(agenteId, "nuevo")
+      : [];
 
     const deduped = dedupeConversationsByPhonePerEstado([
       ...activosRaw,
@@ -1154,6 +1264,56 @@ class ChatModelMongo {
     return uid;
   }
 
+  async resolveAgentRefs(agenteId) {
+    const uid = String(agenteId || "").trim();
+    if (!uid) return [];
+
+    const refs = new Set([uid]);
+    const numeric = Number(uid);
+    if (Number.isFinite(numeric)) {
+      refs.add(numeric);
+      refs.add(String(numeric));
+    }
+
+    try {
+      const UsuarioModel = require("./UsuarioModel.mysql");
+      const usuarios = await UsuarioModel.getAllUsuarios();
+      const found = usuarios.find((user) => {
+        const keys = [user.id, user._id, user.exten, user.usuario, user.agente]
+          .map((key) => String(key || "").trim())
+          .filter(Boolean);
+        return keys.includes(uid);
+      });
+
+      if (found) {
+        [found.id, found._id, found.exten, found.usuario, found.agente].forEach(
+          (key) => {
+            const value = String(key || "").trim();
+            if (!value || value === "undefined") return;
+            refs.add(value);
+            const asNum = Number(value);
+            if (Number.isFinite(asNum)) {
+              refs.add(asNum);
+              refs.add(String(asNum));
+            }
+          },
+        );
+      }
+    } catch (_) {
+      // sin alias adicionales
+    }
+
+    return [...refs];
+  }
+
+  async buildAgentAssignmentFilter(agenteId) {
+    const refs = await this.resolveAgentRefs(agenteId);
+    if (!refs.length) return null;
+    return {
+      $or: [{ agenteId: { $in: refs } }, { agente_id: { $in: refs } }],
+    };
+  }
+
   createConversationIdentity() {
     const oid = new mongoose.Types.ObjectId();
     const idStr = String(oid);
@@ -1288,11 +1448,11 @@ class ChatModelMongo {
   // backend/chatapp/models/ChatModel.mongo.js
   // Obtener solo las conversaciones del agente
   async getConversaciones(agenteId, estado) {
-    const agenteFilter = this.buildAgentIdFilter(agenteId);
-    if (!agenteFilter) return [];
+    const agentAssignment = await this.buildAgentAssignmentFilter(agenteId);
+    if (!agentAssignment) return [];
 
     const conversations = await Conversation.find({
-      $or: [{ agenteId: agenteFilter }, { agente_id: agenteFilter }],
+      ...agentAssignment,
       estado,
     })
       .sort({ inicio: -1 })

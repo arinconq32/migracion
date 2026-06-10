@@ -38,6 +38,7 @@ import {
   formatPhoneDisplay,
 } from "@/utils/contactDisplay";
 import { resolveAgentIdFromSources } from "@/utils/agentId";
+import { isConversationTransferredToOtherAgent } from "@/utils/transferConversation";
 import {
   buildInternalConvId,
   fetchInternalAgents,
@@ -175,6 +176,9 @@ const isConvBloqueado = (item) =>
       item?.metadata?.bloqueado ||
       String(item?.marca || "").toLowerCase() === "bloqueado",
   );
+
+const isConvTransferida = (item) =>
+  isConversationTransferredToOtherAgent(item, obtenerAgenteIdActual());
 
 const props = defineProps({
   conversations: {
@@ -414,7 +418,18 @@ const agentCorreo = computed(
   () => String(props.agentInfo?.correo || "-").trim() || "-",
 );
 const agentEstadoOpciones = ["Activo", "Ausente", "Ocupado", "Sin conexion"];
-const agentEstadoSeleccionado = ref("Activo");
+const agentEstadoSeleccionado = ref(store.agentEstadoConexion || "Activo");
+
+watch(
+  () => store.agentEstadoConexion,
+  (estado) => {
+    const next = String(estado || "Activo").trim() || "Activo";
+    agentEstadoSeleccionado.value = agentEstadoOpciones.includes(next)
+      ? next
+      : "Activo";
+  },
+);
+
 const agentViewMode = ref("profile");
 const agentRefreshTick = ref(0);
 const agentCreateSubmitting = ref(false);
@@ -457,8 +472,7 @@ const agentContacts = computed(() => {
 });
 
 const abrirInfoAgente = () => {
-  const inicial =
-    String(props.agentInfo?.estado || "Activo").trim() || "Activo";
+  const inicial = String(store.agentEstadoConexion || "Activo").trim() || "Activo";
   agentEstadoSeleccionado.value = agentEstadoOpciones.includes(inicial)
     ? inicial
     : "Activo";
@@ -473,8 +487,10 @@ const cerrarInfoAgente = () => {
 };
 
 const cambiarEstadoAgente = (estado) => {
-  agentEstadoSeleccionado.value = estado;
-  emit("agent-status-change", estado);
+  const nextEstado = String(estado || "Activo").trim() || "Activo";
+  agentEstadoSeleccionado.value = nextEstado;
+  store.setAgentEstadoConexion(nextEstado);
+  emit("agent-status-change", nextEstado);
 };
 
 const limpiarFormularioCrearContacto = () => {
@@ -1242,6 +1258,7 @@ onMounted(() => {
             unread: Number(item.unread) > 0,
             'is-destacado': isConvDestacado(item),
             'is-bloqueado': isConvBloqueado(item),
+            'is-transferida': isConvTransferida(item),
           }"
           @click="handleConversationClick(item, section.key)"
         >
@@ -2010,6 +2027,50 @@ onMounted(() => {
 .contact-card.is-bloqueado.is-destacado::after {
   background: linear-gradient(180deg, #d4d4d8 0%, #a1a1aa 100%);
   box-shadow: none;
+}
+
+.contact-card.is-transferida {
+  background: linear-gradient(105deg, #eff6ff 0%, #f8fbff 42%, #ffffff 100%);
+  border-bottom-color: rgba(59, 130, 246, 0.24);
+  box-shadow:
+    inset 0 0 0 1px rgba(59, 130, 246, 0.14),
+    0 6px 18px rgba(37, 99, 235, 0.05);
+}
+
+.contact-card.is-transferida::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 4px;
+  border-radius: 0 6px 6px 0;
+  background: linear-gradient(180deg, #93c5fd 0%, #3b82f6 52%, #2563eb 100%);
+  box-shadow: 0 0 12px rgba(37, 99, 235, 0.28);
+}
+
+.contact-card.is-transferida:hover {
+  background: linear-gradient(105deg, #dbeafe 0%, #eff6ff 48%, #ffffff 100%);
+}
+
+.contact-card.is-transferida.selected {
+  background: linear-gradient(105deg, #bfdbfe 0%, #dbeafe 45%, #eff6ff 100%);
+  border-bottom-color: rgba(37, 99, 235, 0.32);
+}
+
+.contact-card.is-transferida .contact-card-indicator {
+  background: transparent;
+}
+
+.contact-card.is-transferida .contact-avatar {
+  border-color: #93c5fd;
+  box-shadow:
+    0 0 0 2px #fff,
+    0 0 0 3px rgba(59, 130, 246, 0.22);
+}
+
+.contact-card.is-transferida.is-destacado::after {
+  background: linear-gradient(180deg, #93c5fd 0%, #3b82f6 52%, #f59e0b 100%);
 }
 
 .contact-card.unread .contact-name {

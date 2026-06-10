@@ -15,8 +15,17 @@ const closeItem = (id) => {
 
 <template>
   <div class="notification-panel">
-    <div v-for="item in items" :key="item.id" class="toast" :class="item.type">
-      <span class="toast-text">{{ item.text }}</span>
+    <div
+      v-for="item in items"
+      :key="item.id"
+      class="toast"
+      :class="item.type"
+      role="alert"
+    >
+      <div class="toast-content">
+        <p v-if="item.title" class="toast-title">{{ item.title }}</p>
+        <p class="toast-text">{{ item.text }}</p>
+      </div>
       <button
         type="button"
         class="toast-close"
@@ -40,25 +49,37 @@ const closeItem = (id) => {
 }
 
 .toast {
-  min-width: 260px;
-  max-width: 320px;
+  min-width: 280px;
+  max-width: 360px;
   background: #fff;
   border: 1px solid #d4e4bf;
   color: #334627;
   border-left: 4px solid var(--color-primary);
-  padding: 10px 8px 10px 12px;
+  padding: 12px 10px 12px 14px;
   border-radius: 10px;
-  box-shadow: 0 6px 18px rgba(25, 42, 70, 0.12);
+  box-shadow: 0 8px 22px rgba(25, 42, 70, 0.14);
   font-size: 13px;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
+}
+
+.toast-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.toast-title {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #24351d;
 }
 
 .toast-text {
-  flex: 1;
-  min-width: 0;
+  margin: 0;
+  line-height: 1.45;
 }
 
 .toast-close {
@@ -86,6 +107,16 @@ const closeItem = (id) => {
 
 .toast.info {
   border-left-color: var(--color-primary);
+}
+
+.toast.transfer-out {
+  border-left-color: #d97706;
+  background: #fffaf0;
+}
+
+.toast.transfer-in {
+  border-left-color: #2563eb;
+  background: #f0f7ff;
 }
 </style>
 

@@ -52,7 +52,9 @@ const getState = async (userId, options = {}) => {
 
   const activosRaw = await chatModelInstance.getConversaciones(userId, "abierta");
   const cerradosRaw = await chatModelInstance.getConversaciones(userId, "cerrada");
-  const nuevosRaw = await chatModelInstance.getPendientes();
+  const nuevosRaw = userId
+    ? await chatModelInstance.getConversaciones(userId, "nuevo")
+    : [];
 
   const deduped = dedupeConversationsByPhonePerEstado([
     ...activosRaw,
@@ -88,11 +90,18 @@ const getState = async (userId, options = {}) => {
   return { activos, nuevos, cerrados };
 };
 
+function socketMatchesAgentRef(socket, agentRef) {
+  const target = String(agentRef || "").trim();
+  if (!target) return false;
+  const userId = String(socket?.data?.userId || "").trim();
+  const exten = String(socket?.data?.exten || "").trim();
+  return target === userId || target === exten;
+}
+
 function emitStateToUserSockets(userId, state) {
   if (!ioInstance) return;
   for (const socket of ioInstance.sockets.sockets.values()) {
-    const uid = getSocketUserId(socket);
-    if (!uid || String(uid) !== String(userId)) continue;
+    if (!socketMatchesAgentRef(socket, userId)) continue;
     socket.emit("update_queues", state);
   }
 }
@@ -133,6 +142,27 @@ const broadcastForUser = async (userId, options = {}) => {
   });
   emitStateToUserSockets(uid, state);
   return state;
+};
+
+const broadcastForAgentRefs = async (agentRefs = [], options = {}) => {
+  if (!chatModelInstance) return [];
+  const refs = [
+    ...new Set(
+      agentRefs.map((ref) => String(ref || "").trim()).filter(Boolean),
+    ),
+  ];
+  if (!refs.length) return [];
+
+  const results = [];
+  for (const ref of refs) {
+    const state = await getState(ref, {
+      includeMessages: options.includeMessages === true,
+      log: false,
+    });
+    emitStateToUserSockets(ref, state);
+    results.push({ ref, state });
+  }
+  return results;
 };
 
 const assignNext = async (uid) => {
@@ -195,6 +225,7 @@ module.exports = {
   getState,
   broadcast,
   broadcastForUser,
+  broadcastForAgentRefs,
   emitStateToUserSockets,
   assignNext,
   broadcastEtiquetasCatalog,

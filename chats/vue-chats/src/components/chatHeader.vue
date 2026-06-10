@@ -24,6 +24,10 @@ defineProps({
     type: Boolean,
     default: false,
   },
+  transferred: {
+    type: Boolean,
+    default: false,
+  },
 });
 
 defineEmits([
@@ -36,7 +40,13 @@ defineEmits([
 </script>
 
 <template>
-  <header class="chat-header" :class="{ 'chat-header-featured': featured }">
+  <header
+    class="chat-header"
+    :class="{
+      'chat-header-featured': featured,
+      'chat-header-transferred': transferred,
+    }"
+  >
     <div class="identity">
       <button
         type="button"
@@ -129,6 +139,12 @@ defineEmits([
   background: linear-gradient(180deg, #fffbeb 0%, #ffffff 100%);
   border-bottom-color: rgba(251, 191, 36, 0.35);
   box-shadow: inset 0 3px 0 0 #f59e0b;
+}
+
+.chat-header-transferred {
+  background: linear-gradient(180deg, #eff6ff 0%, #ffffff 100%);
+  border-bottom-color: rgba(59, 130, 246, 0.32);
+  box-shadow: inset 0 3px 0 0 #3b82f6;
 }
 
 .header-text {

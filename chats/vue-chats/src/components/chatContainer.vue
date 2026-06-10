@@ -15,7 +15,8 @@ import {
   mapInternalMessagesForUi,
 } from "@/composables/useInternalChatSocket";
 import { useAgentProfile } from "@/composables/useAgentProfile";
-import { cargarMensajesConversacion, getSocket, cargarMultimediaDeConversacion, cambiarConversacion, abrirChat, promoverNuevoSiHayCupo } from "@/composables/useSocket";
+import { cargarMensajesConversacion, getSocket, cargarMultimediaDeConversacion, cambiarConversacion, abrirChat, promoverNuevoSiHayCupo, emitSocket } from "@/composables/useSocket";
+import { mostrarToast } from "@/composables/useNotificaciones";
 
 const store = useChatStore();
 const { mensajesInternosPorPeer, conversacionActivaId, internalMessagesRevision } =
@@ -210,19 +211,13 @@ const currentMessages = computed(() => {
 });
 
 const notifications = computed(() => {
-  const items = [];
+  const items = [...store.transferNotifications];
   if (store.totalNoLeidos > 0) {
     items.push({
       id: "unread",
       type: "info",
       text: `${store.totalNoLeidos} mensaje(s) sin leer`,
-    });
-  }
-  if (store.initialized) {
-    items.push({
-      id: "connected",
-      type: "success",
-      text: "Conectado al servidor",
+      persistent: false,
     });
   }
   return items;
@@ -388,7 +383,14 @@ const onSelectConversation = async (id) => {
   await cargarMensajesDeConversacion(nextId, true);
 };
 
+const ensureAgentCanSend = () => {
+  if (store.agentPuedeEnviarMensajes) return true;
+  mostrarToast(store.mensajeBloqueoPorEstadoAgente(), "warning");
+  return false;
+};
+
 const onSendMessage = (text) => {
+  if (!ensureAgentCanSend()) return;
   if (!text || !conversacionActivaId.value) return;
   const peerId = activeInternalPeerId.value;
   if (peerId) {
@@ -406,6 +408,37 @@ const onUpdateConversationSearchTerm = (value) => {
   busquedaConversacion.value = String(value || "");
 };
 
+const onAgentStatusChange = (estado) => {
+  const nextEstado = String(estado || "Activo").trim() || "Activo";
+  const previousEstado = store.agentEstadoConexion;
+  store.setAgentEstadoConexion(nextEstado);
+  emitSocket("cambiar_estado_agente", { estado: nextEstado }, (response) => {
+    if (response?.ok === false) {
+      store.setAgentEstadoConexion(previousEstado);
+      mostrarToast(
+        response?.error || "No se pudo actualizar el estado del agente",
+        "error",
+      );
+      return;
+    }
+    if (nextEstado === "Activo") {
+      mostrarToast(
+        Number(response?.notified || 0) > 0
+          ? `Estado Activo. Se notificó a ${response.notified} conversación(es) activa(s).`
+          : "Estado Activo. Ya puedes escribir y enviar multimedia.",
+        "success",
+      );
+      return;
+    }
+    mostrarToast(
+      Number(response?.notified || 0) > 0
+        ? `Estado ${nextEstado}. Chat bloqueado y ${response.notified} cliente(s) notificado(s).`
+        : `Estado ${nextEstado}. No puedes escribir ni enviar multimedia.`,
+      "warning",
+    );
+  });
+};
+
 const onCloseNotification = (id) => {
   const normalizedId = String(id || "").trim();
   if (!normalizedId) return;
@@ -414,6 +447,7 @@ const onCloseNotification = (id) => {
     ...dismissedNotificationIds.value,
     normalizedId,
   ];
+  store.dismissTransferNotification(normalizedId);
 };
 </script>
 
@@ -427,6 +461,7 @@ const onCloseNotification = (id) => {
         :agent-info="agenteActual"
         @select="onSelectConversation"
         @update-search-term="onUpdateConversationSearchTerm"
+        @agent-status-change="onAgentStatusChange"
       />
     </aside>
 

@@ -558,8 +558,16 @@ export function limpiarToastSoporte(
   const key = String(from || '').trim();
   if (!key) return;
 
-  // Aquí iría la lógica para mantener registro de toasts activos
-  // Por ahora es una función de referencia
+  const container = document.getElementById('toast-container-bottom');
+  if (container) {
+    const nodes = container.querySelectorAll('.toast-persistent .toast-body');
+    nodes.forEach((body) => {
+      if (body.textContent?.includes(key)) {
+        body.closest('.toast-persistent')?.remove();
+      }
+    });
+    if (!container.children.length) container.remove();
+  }
 
   if (mostrarAviso) {
     mostrarToast(mensaje || 'Solicitud expirada por tiempo', 'warning');

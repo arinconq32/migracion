@@ -80,6 +80,17 @@ class ChatSocketHandler {
       }
 
       const agentKey = socket.data.userId || socket.data.exten;
+      if (
+        agentKey &&
+        typeof this.chatModel.getAgentDisplayName === "function"
+      ) {
+        try {
+          const nombreAgente = await this.chatModel.getAgentDisplayName(agentKey);
+          if (nombreAgente) socket.data.nombreAgente = nombreAgente;
+        } catch (_) {
+          // sin nombre de agente
+        }
+      }
       if (agentKey) {
         await this.syncAgentActiveConversations(agentKey);
       }
@@ -620,6 +631,23 @@ class ChatSocketHandler {
           error: response.error || "No se pudo guardar el mensaje interno",
         });
       }
+      if (typeof callback === "function") callback(response);
+    });
+
+    socket.on("cambiar_estado_agente", async (payload, callback) => {
+      if (!this.runtimeService) {
+        if (typeof callback === "function") {
+          callback({ ok: false, error: "runtime no configurado" });
+        }
+        return;
+      }
+
+      const estado = String(payload?.estado || "Activo").trim() || "Activo";
+      const response = await this.runtimeService.handleAgentStatusChange(
+        socket,
+        estado,
+        { silent: Boolean(payload?.silent) },
+      );
       if (typeof callback === "function") callback(response);
     });
 

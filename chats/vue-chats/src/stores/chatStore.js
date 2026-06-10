@@ -119,6 +119,12 @@ const normalizeConversation = (conversation = {}) => {
       metadata.contactoId ||
       "",
     origen: conversation.origen || metadata.origen || "",
+    agenteId: conversation.agenteId || conversation.agente_id || null,
+    agente_id: conversation.agente_id || conversation.agenteId || null,
+    agente_origen_exten:
+      conversation.agente_origen_exten || metadata.agente_origen_exten || null,
+    transferida: Boolean(conversation.transferida),
+    transferOrigenId: conversation.transferOrigenId || null,
     destacado: Boolean(conversation.destacado || metadata.destacado),
     bloqueado: Boolean(conversation.bloqueado || metadata.bloqueado),
     etiquetas: etiquetasConv,
@@ -194,6 +200,7 @@ export const useChatStore = defineStore("chat", () => {
   // Filtro de conversaciones por etiquetas (IDs)
   const filtrosEtiquetasSeleccionadas = ref([]);
   const motivosCierre = ref([]);
+  const transferNotifications = ref([]);
   const tipificaciones = ref([]);
   const agentesInternos = ref([]);
   const mensajesInternosPorPeer = ref({});
@@ -205,6 +212,50 @@ export const useChatStore = defineStore("chat", () => {
   const activeCountDb = ref(0);
   const maxActiveConversations = ref(3);
   const activeConversationIdsDb = ref([]);
+  const AGENT_STATUS_STORAGE_KEY = "agentEstadoConexion";
+
+  const readStoredAgentEstado = () => {
+    try {
+      const stored = String(
+        sessionStorage.getItem(AGENT_STATUS_STORAGE_KEY) || "",
+      ).trim();
+      return stored || "Activo";
+    } catch {
+      return "Activo";
+    }
+  };
+
+  const agentEstadoConexion = ref(readStoredAgentEstado());
+
+  const agentPuedeEnviarMensajes = computed(
+    () =>
+      String(agentEstadoConexion.value || "Activo").trim().toLowerCase() ===
+      "activo",
+  );
+
+  const mensajeBloqueoPorEstadoAgente = () => {
+    const estado = String(agentEstadoConexion.value || "").trim();
+    if (estado === "Ocupado") {
+      return "Tu estado es Ocupado. Cambia a Activo para escribir o enviar multimedia.";
+    }
+    if (estado === "Ausente") {
+      return "Tu estado es Ausente. Cambia a Activo para escribir o enviar multimedia.";
+    }
+    if (/sin conexion/i.test(estado)) {
+      return "Tu estado es Sin conexión. Cambia a Activo para escribir o enviar multimedia.";
+    }
+    return "Cambia tu estado a Activo para escribir o enviar multimedia.";
+  };
+
+  const setAgentEstadoConexion = (estado) => {
+    const next = String(estado || "Activo").trim() || "Activo";
+    agentEstadoConexion.value = next;
+    try {
+      sessionStorage.setItem(AGENT_STATUS_STORAGE_KEY, next);
+    } catch {
+      /* ignore */
+    }
+  };
 
   const totalNoLeidosInternos = computed(() =>
     Object.values(noLeidosInternosPorPeer.value).reduce(
@@ -322,12 +373,15 @@ export const useChatStore = defineStore("chat", () => {
     }
   };
 
-  const setQueueState = ({
-    activos: stateActivos = [],
-    nuevos: stateNuevos = [],
-    cerrados: stateCerrados = [],
-  } = {}) => {
-    const nextMap = { ...conversaciones.value };
+  const setQueueState = (
+    {
+      activos: stateActivos = [],
+      nuevos: stateNuevos = [],
+      cerrados: stateCerrados = [],
+    } = {},
+    options = {},
+  ) => {
+    const nextMap = options.replace ? {} : { ...conversaciones.value };
 
     const applyQueue = (items, estado) => {
       for (const c of dedupeConversationsByPhonePerEstado(items)) {
@@ -735,11 +789,37 @@ export const useChatStore = defineStore("chat", () => {
     }
   };
 
+  const addTransferNotification = (notification = {}) => {
+    const id = String(notification.id || "").trim();
+    const text = String(notification.text || "").trim();
+    if (!id || !text) return;
+
+    transferNotifications.value = [
+      {
+        id,
+        type: notification.type || "info",
+        title: String(notification.title || "").trim(),
+        text,
+        persistent: notification.persistent !== false,
+      },
+      ...transferNotifications.value.filter((item) => item.id !== id),
+    ].slice(0, 8);
+  };
+
+  const dismissTransferNotification = (id) => {
+    const normalized = String(id || "").trim();
+    if (!normalized) return;
+    transferNotifications.value = transferNotifications.value.filter(
+      (item) => item.id !== normalized,
+    );
+  };
+
   const resetStore = () => {
     conversaciones.value = {};
     mensajesPorConv.value = {};
     conversacionActivaId.value = null;
     initialized.value = false;
+    transferNotifications.value = [];
     etiquetasPorConv.value = {};
     labelModalOpen.value = false;
     labelModalConvId.value = null;
@@ -954,6 +1034,10 @@ export const useChatStore = defineStore("chat", () => {
     maxActiveConversations,
     activeConversationIdsDb,
     activeCountSynced,
+    agentEstadoConexion,
+    agentPuedeEnviarMensajes,
+    mensajeBloqueoPorEstadoAgente,
+    setAgentEstadoConexion,
     setActiveConversationCount,
     nuevos,
     cerrados,
@@ -969,6 +1053,9 @@ export const useChatStore = defineStore("chat", () => {
     labelMenuY,
     filtrosEtiquetasSeleccionadas,
     motivosCierre,
+    transferNotifications,
+    addTransferNotification,
+    dismissTransferNotification,
     tipificaciones,
     agentesInternos,
     mensajesInternosPorPeer,

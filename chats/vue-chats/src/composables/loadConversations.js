@@ -71,22 +71,16 @@ export async function loadConversationsForStore(store, options = {}) {
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt += 1) {
     try {
-      let conversations = await fetchConversationsJson(
+      const conversations = await fetchConversationsJson(
         `${apiBase}/api/conversations?userId=${encodeURIComponent(agentId)}`,
       );
-
-      if (conversations.length === 0) {
-        conversations = await fetchConversationsJson(
-          `${apiBase}/api/conversations`,
-        );
-      }
 
       if (conversations.length === 0 && !force && countQueues(store) > 0) {
         return { agentId, loaded: false, keptExisting: true };
       }
 
       if (conversations.length > 0 || force || countQueues(store) === 0) {
-        store.setQueueState(splitQueues(conversations));
+        store.setQueueState(splitQueues(conversations), { replace: true });
         await enrichConversationsWithContacts(store);
         return { agentId, loaded: true, count: conversations.length };
       }

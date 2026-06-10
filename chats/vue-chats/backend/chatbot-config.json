@@ -1,0 +1,25 @@
+{
+  "saludo_menu": "👋 ¡Bienvenido!\n\n¿En qué podemos ayudarte hoy?",
+  "opciones_menu": [
+    {
+      "titulo": "🛠️ Soporte",
+      "postback": "btn_soporte",
+      "cola": "LuisPruebas",
+      "mensaje_espera": "🛠️ *Conectando con Soporte*\n\n⏳ Buscando agente disponible...\n\n_Por favor espera un momento._"
+    },
+    {
+      "titulo": "💰 Ventas",
+      "postback": "btn_ventas",
+      "cola": "colaVentas",
+      "mensaje_espera": "💰 *Conectando con Ventas*\n\n⏳ Buscando agente disponible...\n\n_Por favor espera un momento._"
+    },
+    {
+      "titulo": "🔧 Mantenimiento",
+      "postback": "btn_mantenimiento",
+      "cola": "colaMantenimiento",
+      "mensaje_espera": "🔧 *Conectando con Mantenimiento*\n\n⏳ Buscando agente disponible...\n\n_Por favor espera un momento._"
+    }
+  ],
+  "mensaje_no_agentes": "⏰ No hay agentes disponibles en este momento.\n\nHas vuelto al chatbot automático.",
+  "mensaje_despedida": "👋 ¡Hasta pronto! Fue un placer atenderte."
+}

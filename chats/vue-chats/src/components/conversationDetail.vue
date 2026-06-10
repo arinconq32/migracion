@@ -24,12 +24,14 @@ import {
 } from "@/composables/useSocket";
 import { useChatStore } from "@/stores/chatStore";
 import { resolveAgentIdFromSources } from "@/utils/agentId";
+import { isConversationTransferredToOtherAgent } from "@/utils/transferConversation";
 import {
   confirmDelete,
   confirmSave,
   showError,
   showSuccess,
 } from "@/utils/swal";
+import { mostrarToast } from "@/composables/useNotificaciones";
 import {
   buildInternalConvId,
   parseInternalPeerId,
@@ -78,6 +80,7 @@ const historialError = ref("");
 const historialPersona = ref(null);
 const historialData = ref([]);
 const historialCurrentPage = ref(1);
+const historialTransferExpanded = ref(new Set());
 const modalMensajesConvOpen = ref(false);
 const mensajesConvId = ref("");
 const mensajesConvLoadId = ref("");
@@ -100,6 +103,24 @@ const editContactForm = ref({
 // ── Contact actions ───────────────────────────────────
 const isDestacado = computed(() => Boolean(props.conversation?.destacado));
 const isBloqueado = computed(() => Boolean(props.conversation?.bloqueado));
+const isTransferida = computed(() =>
+  isConversationTransferredToOtherAgent(
+    props.conversation || {},
+    resolveAgentIdFromSources(),
+  ),
+);
+const agentPuedeEnviar = computed(() => store.agentPuedeEnviarMensajes);
+const agentEstadoActual = computed(() => store.agentEstadoConexion || "Activo");
+
+const avisarBloqueoPorEstadoAgente = () => {
+  mostrarToast(store.mensajeBloqueoPorEstadoAgente(), "warning");
+};
+
+const ensureAgentCanSend = () => {
+  if (agentPuedeEnviar.value) return true;
+  avisarBloqueoPorEstadoAgente();
+  return false;
+};
 const contactSidebarMode = ref("info");
 const multimediaLoading = ref(false);
 const multimediaError = ref("");
@@ -451,6 +472,19 @@ const solicitarHistorialClienteSocket = async ({
   });
 };
 
+const mapearTransferenciasHistorial = (transferencias = []) => {
+  if (!Array.isArray(transferencias)) return [];
+  return transferencias
+    .map((transfer) => ({
+      fecha: formatearFechaHistorial(transfer?.fecha),
+      desde: transfer?.desde || "-",
+      hacia: transfer?.hacia || "-",
+      motivo: transfer?.motivo || "Sin comentario",
+      ordenTs: Number(transfer?.ordenTs || transfer?.fecha || 0) || 0,
+    }))
+    .sort((a, b) => (b.ordenTs || 0) - (a.ordenTs || 0));
+};
+
 const mapearFilaHistorial = (fila, convIdFallback) => ({
   data: fila?.data || "-",
   fecha: formatearFechaHistorial(fila?.fecha),
@@ -467,7 +501,34 @@ const mapearFilaHistorial = (fila, convIdFallback) => ({
   gestiono: fila?.gestiono || "-",
   telefono: fila?.telefono || "-",
   ordenTs: Number(fila?.ordenTs || fila?.fecha || 0) || 0,
+  transferencias: String(fila?.conversacionRef || "").trim()
+    ? mapearTransferenciasHistorial(fila?.transferencias)
+    : [],
 });
+
+const historialRowKey = (item, idx) =>
+  `${item.conversacionRef || item.conversacion}_${item.ordenTs}_${idx}`;
+
+const historialConvKey = (item) =>
+  String(item?.conversacionRef || item?.conversacion || "").trim();
+
+const historialTransferenciasVisibles = (item) =>
+  Array.isArray(item?.transferencias) && item.transferencias.length > 0;
+
+const historialTransferenciasAbiertas = (item, idx) =>
+  historialTransferExpanded.value.has(historialRowKey(item, idx));
+
+const toggleHistorialTransferencias = (item, idx) => {
+  const key = historialRowKey(item, idx);
+  const next = new Set(historialTransferExpanded.value);
+  if (next.has(key)) next.delete(key);
+  else next.add(key);
+  historialTransferExpanded.value = next;
+};
+
+const limpiarHistorialTransferExpanded = () => {
+  historialTransferExpanded.value = new Set();
+};
 
 const cargarHistorialCliente = async ({ convId, dni, limit = 300 } = {}) => {
   historialLoading.value = true;
@@ -475,6 +536,7 @@ const cargarHistorialCliente = async ({ convId, dni, limit = 300 } = {}) => {
   historialPersona.value = null;
   historialData.value = [];
   historialCurrentPage.value = 1;
+  limpiarHistorialTransferExpanded();
 
   const resultado = await solicitarHistorialClienteSocket({
     convId,
@@ -518,12 +580,17 @@ const refrescarHistorial = async () => {
 };
 
 const prevHistorialPage = () => {
-  if (historialCurrentPage.value > 1) historialCurrentPage.value -= 1;
+  if (historialCurrentPage.value > 1) {
+    historialCurrentPage.value -= 1;
+    limpiarHistorialTransferExpanded();
+  }
 };
 
 const nextHistorialPage = () => {
-  if (historialCurrentPage.value < historialTotalPaginas.value)
+  if (historialCurrentPage.value < historialTotalPaginas.value) {
     historialCurrentPage.value += 1;
+    limpiarHistorialTransferExpanded();
+  }
 };
 
 const elegirIdCargaMiniatura = (item, fallbackId = "") => {
@@ -736,6 +803,7 @@ const abrirModalHistorial = async () => {
 const cerrarModalHistorial = () => {
   modalHistorialOpen.value = false;
   historialCurrentPage.value = 1;
+  limpiarHistorialTransferExpanded();
 };
 
 const cerrarModalMotivosCierre = () => {
@@ -852,6 +920,7 @@ const confirmarCierreChat = async () => {
 };
 
 const send = () => {
+  if (!ensureAgentCanSend()) return;
   const text = newMessage.value.trim();
   if (!text) return;
   emit("send-message", text);
@@ -1689,6 +1758,7 @@ const selectEmojiCategory = (cat) => {
 };
 
 const triggerFileUpload = () => {
+  if (!ensureAgentCanSend()) return;
   if (!props.conversation) return;
   const input = document.createElement("input");
   input.type = "file";
@@ -1791,6 +1861,7 @@ const sendInternalUploadedMedia = async (file, tipoOverride = null) => {
 };
 
 const sendUploadedMedia = async (file, tipoOverride = null) => {
+  if (!ensureAgentCanSend()) return;
   if (!props.conversation || !file) return;
   if (isInternalChat.value) {
     await sendInternalUploadedMedia(file, tipoOverride);
@@ -1993,6 +2064,7 @@ const _resetRecordingState = () => {
 };
 
 const startRecording = async () => {
+  if (!ensureAgentCanSend()) return;
   if (!props.conversation || isRecording.value || isProcessingAudioSend.value) {
     return;
   }
@@ -2017,6 +2089,7 @@ const startRecording = async () => {
 };
 
 const finishRecordingAndSend = () => {
+  if (!ensureAgentCanSend()) return;
   if (!isRecording.value || !_mediaRecorder || isProcessingAudioSend.value) {
     return;
   }
@@ -2113,6 +2186,7 @@ const togglePauseRecording = () => {
 };
 
 const sendTextMessage = () => {
+  if (!ensureAgentCanSend()) return;
   if (isRecording.value) {
     finishRecordingAndSend();
     return;
@@ -2125,7 +2199,10 @@ const sendTextMessage = () => {
 };
 
 const canSendText = computed(
-  () => Boolean(newMessage.value.trim()) && !isRecording.value,
+  () =>
+    agentPuedeEnviar.value &&
+    Boolean(newMessage.value.trim()) &&
+    !isRecording.value,
 );
 </script>
 
@@ -2135,6 +2212,7 @@ const canSendText = computed(
     :class="{
       'detail-destacado': isDestacado,
       'detail-bloqueado': isBloqueado,
+      'detail-transferida': isTransferida,
     }"
   >
     <ChatHeader
@@ -2148,6 +2226,7 @@ const canSendText = computed(
       "
       :subtitle="subtitle"
       :featured="isDestacado"
+      :transferred="isTransferida"
       :show-close-menu="showCloseMenuInHeader"
       @search="toggleSearch"
       @phone="abrirTelefono"
@@ -2252,13 +2331,27 @@ const canSendText = computed(
 
     <LabelAssigner />
 
-    <form class="composer" @submit.prevent="sendTextMessage">
+    <div
+      v-if="props.conversation && !agentPuedeEnviar"
+      class="composer-status-banner"
+    >
+      Chat bloqueado: tu estado es <strong>{{ agentEstadoActual }}</strong>.
+      Cambia a <strong>Activo</strong> en el menú del agente para escribir o
+      enviar multimedia.
+    </div>
+
+    <form
+      class="composer"
+      :class="{ 'composer-locked': !agentPuedeEnviar }"
+      @submit.prevent="sendTextMessage"
+    >
       <!-- Voice recorder controls -->
       <div v-if="isRecording" class="composer-recorder-row">
         <button
           type="button"
           class="composer-icon-btn recorder-cancel-btn"
           title="Cancelar"
+          :disabled="!agentPuedeEnviar"
           @click="cancelRecording"
         >
           ✕
@@ -2271,6 +2364,7 @@ const canSendText = computed(
           type="button"
           class="composer-icon-btn"
           :title="isPaused ? 'Reanudar' : 'Pausar'"
+          :disabled="!agentPuedeEnviar"
           @click="togglePauseRecording"
         >
           <svg
@@ -2298,6 +2392,7 @@ const canSendText = computed(
           type="button"
           class="composer-icon-btn composer-send-btn"
           title="Enviar audio"
+          :disabled="!agentPuedeEnviar || isProcessingAudioSend"
           @click="stopAndSendRecording"
         >
           <svg
@@ -2317,6 +2412,7 @@ const canSendText = computed(
           type="button"
           class="composer-icon-btn"
           title="Adjuntar archivo"
+          :disabled="!agentPuedeEnviar"
           @click="triggerFileUpload"
         >
           <svg
@@ -2340,6 +2436,7 @@ const canSendText = computed(
           class="composer-icon-btn"
           :class="{ active: emojiPanelOpen }"
           title="Emojis"
+          :disabled="!agentPuedeEnviar"
           @click="toggleEmojiPanel"
         >
           <svg
@@ -2364,10 +2461,13 @@ const canSendText = computed(
           v-model="newMessage"
           type="text"
           class="composer-text-input"
+          :disabled="!agentPuedeEnviar"
           :placeholder="
-            isInternalChat
-              ? 'Mensaje, adjunto o nota de voz al agente...'
-              : 'Escribe un mensaje...'
+            !agentPuedeEnviar
+              ? `Estado ${agentEstadoActual}: chat bloqueado`
+              : isInternalChat
+                ? 'Mensaje, adjunto o nota de voz al agente...'
+                : 'Escribe un mensaje...'
           "
           @keydown.enter.prevent="sendTextMessage"
         />
@@ -2375,7 +2475,7 @@ const canSendText = computed(
           type="button"
           class="composer-icon-btn composer-send-btn"
           :title="canSendText ? 'Enviar mensaje' : 'Grabar audio'"
-          :disabled="isProcessingAudioSend"
+          :disabled="!agentPuedeEnviar || isProcessingAudioSend"
           @click="sendTextMessage"
         >
           <svg
@@ -2836,33 +2936,86 @@ const canSendText = computed(
                     <th>Gestiono</th>
                     <th>Telefono</th>
                     <th>Ver chat</th>
+                    <th>Transferencias</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr
+                  <template
                     v-for="(item, idx) in historialPagina"
-                    :key="`${item.conversacion}_${idx}`"
+                    :key="historialRowKey(item, idx)"
                   >
-                    <td>{{ item.fecha }}</td>
-                    <td>{{ item.conversacion }}</td>
-                    <td>{{ item.tipo }}</td>
-                    <td>{{ item.cola }}</td>
-                    <td>{{ item.tipificacion }}</td>
-                    <td>{{ item.comentario }}</td>
-                    <td>{{ item.gestiono }}</td>
-                    <td>{{ item.telefono }}</td>
-                    <td>
-                      <button
-                        v-if="item.conversacion && item.conversacion !== '-'"
-                        class="historial-chat-btn"
-                        type="button"
-                        @click="abrirMensajesDeConvId(item)"
-                      >
-                        Ver miniatura
-                      </button>
-                      <span v-else class="historial-chat-unavailable">—</span>
-                    </td>
-                  </tr>
+                    <tr>
+                      <td>{{ item.fecha }}</td>
+                      <td>{{ item.conversacion }}</td>
+                      <td>{{ item.tipo }}</td>
+                      <td>{{ item.cola }}</td>
+                      <td>{{ item.tipificacion }}</td>
+                      <td>{{ item.comentario }}</td>
+                      <td>{{ item.gestiono }}</td>
+                      <td>{{ item.telefono }}</td>
+                      <td>
+                        <button
+                          v-if="item.conversacion && item.conversacion !== '-'"
+                          class="historial-chat-btn"
+                          type="button"
+                          @click="abrirMensajesDeConvId(item)"
+                        >
+                          Ver miniatura
+                        </button>
+                        <span v-else class="historial-chat-unavailable">—</span>
+                      </td>
+                      <td class="historial-transfer-cell">
+                        <button
+                          v-if="historialTransferenciasVisibles(item)"
+                          class="historial-transfer-btn"
+                          type="button"
+                          :title="
+                            historialTransferenciasAbiertas(item, idx)
+                              ? 'Ocultar transferencias'
+                              : 'Ver transferencias'
+                          "
+                          :aria-expanded="historialTransferenciasAbiertas(item, idx)"
+                          @click="toggleHistorialTransferencias(item, idx)"
+                        >
+                          ⇄
+                        </button>
+                        <span v-else class="historial-chat-unavailable">—</span>
+                      </td>
+                    </tr>
+                    <tr
+                      v-if="
+                        historialTransferenciasAbiertas(item, idx) &&
+                        historialTransferenciasVisibles(item)
+                      "
+                      class="historial-transfer-detail-row"
+                    >
+                      <td colspan="10">
+                        <div class="historial-transfer-panel">
+                          <div class="historial-transfer-panel-title">
+                            Transferencias de la conversacion
+                            {{ historialConvKey(item) || item.conversacion }}
+                          </div>
+                          <ul class="historial-transfer-list">
+                            <li
+                              v-for="(transfer, tIdx) in item.transferencias"
+                              :key="`${historialConvKey(item)}_transfer_${tIdx}`"
+                              class="historial-transfer-item"
+                            >
+                              <span class="historial-transfer-fecha">
+                                {{ transfer.fecha }}
+                              </span>
+                              <span class="historial-transfer-ruta">
+                                {{ transfer.desde }} → {{ transfer.hacia }}
+                              </span>
+                              <span class="historial-transfer-motivo">
+                                Motivo: {{ transfer.motivo }}
+                              </span>
+                            </li>
+                          </ul>
+                        </div>
+                      </td>
+                    </tr>
+                  </template>
                 </tbody>
               </table>
 
@@ -3159,6 +3312,23 @@ const canSendText = computed(
   filter: grayscale(0.12);
 }
 
+.detail-transferida {
+  background: linear-gradient(180deg, #eff6ff 0%, #ffffff 96px);
+  box-shadow: inset 0 0 0 1px rgba(59, 130, 246, 0.16);
+}
+
+.detail-transferida::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, #93c5fd 0%, #3b82f6 50%, #93c5fd 100%);
+  z-index: 3;
+  pointer-events: none;
+}
+
 .detail-bloqueado .messages,
 .detail-bloqueado .composer {
   pointer-events: auto;
@@ -3414,6 +3584,27 @@ const canSendText = computed(
   background: #588044;
   border: 1px solid #588044;
   color: #ffffff;
+}
+
+.composer-status-banner {
+  margin: 0;
+  padding: 10px 14px;
+  background: #fff7ed;
+  border-top: 1px solid #fed7aa;
+  color: #9a3412;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.composer-locked {
+  opacity: 0.72;
+  background: #f8fafc;
+}
+
+.composer-locked .composer-text-input:disabled {
+  background: #f1f5f9;
+  color: #64748b;
+  cursor: not-allowed;
 }
 
 .composer {
@@ -4400,6 +4591,81 @@ const canSendText = computed(
 .historial-table td:nth-child(6) {
   white-space: normal;
   max-width: 320px;
+}
+
+.historial-transfer-cell {
+  text-align: center;
+  width: 72px;
+}
+
+.historial-transfer-btn {
+  border: 1px solid #f0c27a;
+  background: #fff8ef;
+  color: #b45309;
+  border-radius: 6px;
+  width: 30px;
+  height: 30px;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.historial-transfer-btn:hover {
+  background: #ffedd5;
+}
+
+.historial-transfer-detail-row td {
+  background: #fffaf3;
+  padding-top: 0;
+}
+
+.historial-transfer-panel {
+  border: 1px solid #f0d7b2;
+  border-radius: 8px;
+  background: #fffdf8;
+  padding: 10px 12px;
+  margin: 0 0 8px;
+}
+
+.historial-transfer-panel-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #9a3412;
+  margin-bottom: 8px;
+}
+
+.historial-transfer-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.historial-transfer-item {
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 4px 12px;
+  font-size: 12px;
+  color: #5f4b32;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: #fff;
+  border: 1px solid #f3e4cc;
+}
+
+.historial-transfer-fecha {
+  font-weight: 600;
+  color: #7c2d12;
+}
+
+.historial-transfer-ruta {
+  font-weight: 600;
+}
+
+.historial-transfer-motivo {
+  grid-column: 1 / -1;
 }
 
 .historial-table th {

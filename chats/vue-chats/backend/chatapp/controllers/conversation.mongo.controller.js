@@ -144,29 +144,34 @@ function normalizeConversation(obj) {
 // Obtener todas las conversaciones, filtrando por agenteId si se pasa userId, con caché avanzado
 exports.getConversations = async (req, res) => {
   try {
-    const agenteId = req.query.userId;
+    const agenteId = String(req.query.userId || "").trim();
     const estado = req.query.estado || undefined;
     const db = mongoose.connection.db;
 
-    let cacheKey = agenteId
-      ? `conversaciones:${agenteId}`
-      : "conversaciones:all";
+    if (!agenteId) {
+      return res.json([]);
+    }
+
+    let cacheKey = `conversaciones:${agenteId}`;
     if (estado) cacheKey += `:${estado}`;
 
     let rawConversations = await getCache(cacheKey);
     // Lista vacía cacheada ([] es truthy) bloqueaba la UI tras un userId incorrecto.
-    if (
-      Array.isArray(rawConversations) &&
-      rawConversations.length === 0 &&
-      agenteId
-    ) {
+    if (Array.isArray(rawConversations) && rawConversations.length === 0) {
       rawConversations = null;
       await safeDel(cacheKey);
     }
 
     if (!rawConversations) {
       const filter = {};
-      if (agenteId) {
+      if (global.chatModel?.buildAgentAssignmentFilter) {
+        const agentAssignment =
+          await global.chatModel.buildAgentAssignmentFilter(agenteId);
+        if (!agentAssignment) {
+          return res.json([]);
+        }
+        Object.assign(filter, agentAssignment);
+      } else {
         const agenteIdNum = Number(agenteId);
         filter.$or = [
           { agenteId: agenteId },
@@ -181,8 +186,7 @@ exports.getConversations = async (req, res) => {
       const normalizedOnly = dedupeConversationsByPhonePerEstado(
         rawConversations.map((conv) => normalizeConversation(conv)),
       );
-      // No cachear listas vacías por agente (evita pantalla en blanco tras ID incorrecto).
-      if (normalizedOnly.length > 0 || !agenteId) {
+      if (normalizedOnly.length > 0) {
         await setCache(cacheKey, normalizedOnly, CACHE_TTL.CONVERSACIONES);
       }
       rawConversations = normalizedOnly;

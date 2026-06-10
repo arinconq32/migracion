@@ -12,6 +12,8 @@ const contactMongoRoutes = require("./chatapp/routes/contact.mongo.routes");
 const conversationMongoRoutes = require("./chatapp/routes/conversation.mongo.routes");
 const mediaRoutes = require("./chatapp/routes/media.routes");
 const uploadRoutes = require("./chatapp/routes/upload.routes");
+const reportesChatsRoutes = require("./chatapp/routes/reportesChats.routes");
+const reportesChatsController = require("./chatapp/controllers/reportesChats.controller");
 const chatController = require("./chatapp/controllers/chat.controller");
 const chatUtils = require("./chatapp/utils/chatUtils");
 const { connectMongo } = require("./chatapp/config/db.mongo");
@@ -88,6 +90,8 @@ function bootWithModel(model, label) {
 
   chatController.setRuntimeService(runtimeService);
   setAudioRuntimeService(runtimeService);
+  reportesChatsController.setRuntimeService(runtimeService);
+  reportesChatsController.setChatModel(chatModel);
   app.locals.io = io;
   app.use("/", uploadRoutes);
   app.use("/", chatRoutes);
@@ -95,6 +99,7 @@ function bootWithModel(model, label) {
   app.use("/api/auth", authRoutes);
   app.use("/api/contacts", contactMongoRoutes);
   app.use("/api/conversations", conversationMongoRoutes);
+  app.use("/api/reportes-chats", reportesChatsRoutes);
   app.use("/api/media", mediaRoutes);
 
   const socketHandler = new ChatSocketHandler(

@@ -55,6 +55,8 @@ function isGenericConversationName(name, convId, conv = {}) {
   if (convId && value === String(convId)) return true;
   if (/^[a-f0-9]{24}$/i.test(value)) return true;
   if (/^\d+$/.test(value)) return true;
+  if (/^cliente(\s|$)/i.test(value)) return true;
+  if (/^contacto\s+desconocido/i.test(value)) return true;
 
   const contactoId = String(conv.contactoId || conv.contacto_id || conv.data || "").trim();
   if (contactoId && value === contactoId) return true;
@@ -69,7 +71,14 @@ function pickDisplayName(candidates, telefono, convId, conv = {}) {
   const phoneDigits = normalizePhoneDigits(telefono);
 
   for (const raw of candidates) {
-    const name = String(raw || "").split("|")[0].trim();
+    let name = String(raw || "").split("|")[0].trim();
+    const commaParts = name.split(",");
+    if (
+      commaParts.length > 1 &&
+      /^\d+[a-z]?$/i.test(String(commaParts[1] || "").trim())
+    ) {
+      name = commaParts[0].trim();
+    }
     if (!name) continue;
     if (normalizePhoneDigits(name) === phoneDigits) continue;
     if (isGenericConversationName(name, convId, conv)) continue;
@@ -122,7 +131,12 @@ async function buildContactLookup(db, conversations = []) {
 
   const orFilters = [];
   if (dataIds.size) {
-    orFilters.push({ data: { $in: [...dataIds] } });
+    const ids = [...dataIds];
+    orFilters.push(
+      { data: { $in: ids } },
+      { dni: { $in: ids } },
+      { contactoId: { $in: ids } },
+    );
   }
   if (phoneSet.size) {
     const phones = [...phoneSet];
@@ -151,9 +165,16 @@ async function buildContactLookup(db, conversations = []) {
     if (normalized.data) {
       byData.set(normalized.data, normalized);
     }
-    for (const variant of phoneVariants(normalized.telefono)) {
-      if (!byPhone.has(variant)) {
-        byPhone.set(variant, normalized);
+    const phoneParts = String(normalized.telefono || "")
+      .split("|")
+      .map((part) => part.trim())
+      .filter(Boolean);
+    if (!phoneParts.length && normalized.telefono) phoneParts.push(normalized.telefono);
+    for (const part of phoneParts) {
+      for (const variant of phoneVariants(part)) {
+        if (!byPhone.has(variant)) {
+          byPhone.set(variant, normalized);
+        }
       }
     }
   }
@@ -181,9 +202,26 @@ function findContactForConversation(conv = {}, lookup = {}) {
   return null;
 }
 
+function resolveContactNameFromContact(contact, conv = {}) {
+  const convId = conv.id || conv._id || "";
+  const telefono = conv.telefono || conv.tels || "";
+
+  if (contact?.nombre) {
+    const fromContact = pickDisplayName(
+      [contact.nombre],
+      telefono,
+      convId,
+      conv,
+    );
+    if (fromContact) return fromContact;
+  }
+
+  return "Sin nombre";
+}
+
 function enrichConversation(conv = {}, lookup = {}) {
   const contact = findContactForConversation(conv, lookup);
-  const nombre = resolveConversationDisplayName(conv, contact);
+  const nombre = resolveContactNameFromContact(contact, conv);
   const telefono = String(
     conv.telefono || conv.tels || contact?.telefono || "",
   ).trim();
@@ -238,8 +276,10 @@ module.exports = {
   formatPhoneDisplay,
   normalizeContactDoc,
   resolveConversationDisplayName,
+  resolveContactNameFromContact,
   findContactForConversation,
   enrichConversation,
   enrichConversationsWithContacts,
+  buildContactLookup,
   lookupContacts,
 };
