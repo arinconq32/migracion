@@ -419,23 +419,7 @@ const onAgentStatusChange = (estado) => {
         response?.error || "No se pudo actualizar el estado del agente",
         "error",
       );
-      return;
     }
-    if (nextEstado === "Activo") {
-      mostrarToast(
-        Number(response?.notified || 0) > 0
-          ? `Estado Activo. Se notificó a ${response.notified} conversación(es) activa(s).`
-          : "Estado Activo. Ya puedes escribir y enviar multimedia.",
-        "success",
-      );
-      return;
-    }
-    mostrarToast(
-      Number(response?.notified || 0) > 0
-        ? `Estado ${nextEstado}. Chat bloqueado y ${response.notified} cliente(s) notificado(s).`
-        : `Estado ${nextEstado}. No puedes escribir ni enviar multimedia.`,
-      "warning",
-    );
   });
 };
 

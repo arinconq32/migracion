@@ -7,8 +7,9 @@ import {
   getAgentes,
   getEntidades,
   getColas,
-  buildAgentNameLookup,
-  resolveAgentDisplayName,
+  formatAgenteEtiqueta,
+  formatAgenteLineaPrincipal,
+  resolveAgente,
   type Agente,
   type FiltrosReporte,
   type ActividadAgente,
@@ -71,11 +72,6 @@ export default function TabAgentes() {
       .catch(() => {});
   }, []);
 
-  const agentNameLookup = useMemo(
-    () => buildAgentNameLookup(agentes),
-    [agentes],
-  );
-
   const buscar = useCallback(async () => {
     setLoading(true);
     setError("");
@@ -128,11 +124,11 @@ export default function TabAgentes() {
     });
   };
 
-  const labelAgente = (id: string, nombre?: string) => {
-    const n = String(nombre || "").trim();
-    if (n && n !== "—" && n !== id) return n;
-    return resolveAgentDisplayName(id, agentNameLookup, nombre);
-  };
+  const labelAgente = (id: string, nombre?: string) =>
+    formatAgenteEtiqueta(resolveAgente(id, agentes, nombre));
+
+  const nombreAgente = (id: string, nombre?: string) =>
+    formatAgenteLineaPrincipal(resolveAgente(id, agentes, nombre));
 
   return (
     <div className="space-y-6">
@@ -209,7 +205,7 @@ export default function TabAgentes() {
               <tr className="bg-gray-50 dark:bg-gray-900/40">
                 <th className={`${thClass} text-center`}>Transferir</th>
                 <th className={thClass}>Agente</th>
-                <th className={thClass}>ID Agente</th>
+                <th className={thClass}>Extensión</th>
                 <th className={thClass}>Cliente</th>
                 <th className={thClass}>Teléfono</th>
                 <th className={thClass}>Cola</th>
@@ -269,13 +265,12 @@ export default function TabAgentes() {
                           </button>
                         </td>
                         <td className={`${tdClass} font-medium`}>
-                          {resolveAgentDisplayName(
-                            a.agenteId,
-                            agentNameLookup,
-                            a.agenteNombre,
-                          )}
+                          {nombreAgente(a.agenteId, a.agenteNombre)}
                         </td>
-                        <td className={tdClass}>{a.agenteId}</td>
+                        <td className={tdClass}>
+                          {resolveAgente(a.agenteId, agentes, a.agenteNombre)
+                            .extension || "—"}
+                        </td>
                         <td className={tdClass}>{a.nombre}</td>
                         <td className={tdClass}>{a.telefono}</td>
                         <td className={tdClass}>{a.cola}</td>
@@ -360,15 +355,9 @@ export default function TabAgentes() {
                                             </td>
                                             <td className="px-3 py-2 text-gray-700 dark:text-gray-200">
                                               {labelAgente(t.desde, t.desdeNombre)}
-                                              <span className="ml-1 text-xs text-gray-400">
-                                                ({t.desde})
-                                              </span>
                                             </td>
                                             <td className="px-3 py-2 text-gray-700 dark:text-gray-200">
                                               {labelAgente(t.hacia, t.haciaNombre)}
-                                              <span className="ml-1 text-xs text-gray-400">
-                                                ({t.hacia})
-                                              </span>
                                             </td>
                                             <td className="px-3 py-2 text-gray-600 dark:text-gray-300">
                                               {t.comentario || "—"}

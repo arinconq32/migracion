@@ -139,6 +139,29 @@ export interface Agente {
   exten?: string;
 }
 
+export interface AgenteResuelto {
+  nombre: string;
+  extension: string | null;
+}
+
+function esPosibleExtension(value: string) {
+  return /^\d{2,6}[a-z]?$/i.test(value);
+}
+
+export function findAgente(
+  agenteId: string | number | null | undefined,
+  agentes: Agente[],
+) {
+  const id = String(agenteId ?? "").trim();
+  if (!id) return undefined;
+  return agentes.find((ag) => {
+    const keys = [ag.id, ag.exten, ag.usuario]
+      .map((key) => String(key ?? "").trim())
+      .filter(Boolean);
+    return keys.includes(id);
+  });
+}
+
 export function buildAgentNameLookup(agentes: Agente[]) {
   const map = new Map<string, string>();
   agentes.forEach((ag) => {
@@ -152,11 +175,73 @@ export function buildAgentNameLookup(agentes: Agente[]) {
   return map;
 }
 
+export function resolveAgente(
+  agenteId: string | number | null | undefined,
+  agentes: Agente[],
+  backendNombre?: string,
+): AgenteResuelto {
+  const id = String(agenteId ?? "").trim();
+  const agent = findAgente(agenteId, agentes);
+  const nombreAgente = String(agent?.nombre || "").trim();
+  const fromBackend = String(backendNombre || "").trim();
+  const lookup = buildAgentNameLookup(agentes);
+  const extension =
+    String(agent?.exten || "").trim() ||
+    (id && esPosibleExtension(id) ? id : null) ||
+    null;
+
+  let nombre = "—";
+  if (nombreAgente) {
+    nombre = nombreAgente;
+  } else if (
+    fromBackend &&
+    fromBackend !== id &&
+    !esPosibleExtension(fromBackend)
+  ) {
+    nombre = fromBackend;
+  } else {
+    const fromLookup = lookup.get(id);
+    if (fromLookup) nombre = fromLookup;
+  }
+
+  return { nombre, extension };
+}
+
+/** Etiqueta compacta: "María López · ext. 1001" */
+export function formatAgenteEtiqueta(info: AgenteResuelto) {
+  const tieneNombre = info.nombre && info.nombre !== "—";
+  if (tieneNombre && info.extension) {
+    return `${info.nombre} · ext. ${info.extension}`;
+  }
+  if (tieneNombre) return info.nombre;
+  if (info.extension) return `Ext. ${info.extension}`;
+  return "Sin asignar";
+}
+
+/** Línea principal (solo nombre o extensión si no hay nombre). */
+export function formatAgenteLineaPrincipal(info: AgenteResuelto) {
+  const tieneNombre = info.nombre && info.nombre !== "—";
+  if (tieneNombre) return info.nombre;
+  if (info.extension) return `Ext. ${info.extension}`;
+  return "Sin asignar";
+}
+
+/** Línea secundaria con extensión, solo cuando ya hay nombre. */
+export function formatAgenteLineaSecundaria(info: AgenteResuelto) {
+  const tieneNombre = info.nombre && info.nombre !== "—";
+  if (tieneNombre && info.extension) return `Ext. ${info.extension}`;
+  return null;
+}
+
 export function resolveAgentDisplayName(
   agenteId: string | number | null | undefined,
   lookup: Map<string, string>,
   backendNombre?: string,
+  agentes?: Agente[],
 ) {
+  if (agentes?.length) {
+    return formatAgenteEtiqueta(resolveAgente(agenteId, agentes, backendNombre));
+  }
   const id = String(agenteId ?? "").trim();
   const fromBackend = String(backendNombre || "").trim();
   if (fromBackend && fromBackend !== id) return fromBackend;

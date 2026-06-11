@@ -14,9 +14,9 @@ import {
 
   enviarMensajeSupervisor,
 
-  buildAgentNameLookup,
+  formatAgenteEtiqueta,
 
-  resolveAgentDisplayName,
+  resolveAgente,
 
   type Agente,
 
@@ -54,30 +54,12 @@ import {
 
 
 
-function agenteLabel(
-
-  conv: ConversacionActiva,
-
-  lookup: Map<string, string>,
-
-) {
-
+function agenteLabel(conv: ConversacionActiva, agentes: Agente[]) {
   const id = String(conv.agenteId || "").trim();
-
   if (!id || id === "—") return "Sin asignar";
-
-  const nombre = resolveAgentDisplayName(
-
-    conv.agenteId,
-
-    lookup,
-
-    conv.agenteNombre,
-
+  return formatAgenteEtiqueta(
+    resolveAgente(conv.agenteId, agentes, conv.agenteNombre),
   );
-
-  return nombre !== "—" ? nombre : id;
-
 }
 
 
@@ -114,32 +96,31 @@ function MarcaConversacion({ conv }: { conv: ConversacionActiva }) {
   );
 }
 
-function transferenciaTexto(conv: ConversacionActiva) {
-
+function transferenciaTexto(conv: ConversacionActiva, agentes: Agente[]) {
   if (!conv.transferido) return null;
 
+  const etiqueta = (id?: string, nombre?: string) =>
+    id
+      ? formatAgenteEtiqueta(resolveAgente(id, agentes, nombre))
+      : nombre || "—";
+
   const ultima = conv.ultimaTransferencia;
-
-  if (ultima?.desdeNombre && ultima?.haciaNombre) {
-
-    return `Transferida: ${ultima.desdeNombre} → ${ultima.haciaNombre}`;
-
+  if (ultima?.desde || ultima?.hacia) {
+    const desde = etiqueta(ultima.desde, ultima.desdeNombre);
+    const hacia = etiqueta(ultima.hacia, ultima.haciaNombre);
+    return `Transferida: ${desde} → ${hacia}`;
   }
 
   const lista = conv.transferencias || [];
-
   if (!lista.length) return "Con transferencia";
 
   const t = lista[lista.length - 1];
-
-  const desde = t.desdeNombre || t.desde;
-
-  const hacia = t.haciaNombre || t.hacia;
-
-  if (desde && hacia) return `Transferida: ${desde} → ${hacia}`;
-
+  const desde = etiqueta(t.desde, t.desdeNombre);
+  const hacia = etiqueta(t.hacia, t.haciaNombre);
+  if (desde !== "—" && hacia !== "—") {
+    return `Transferida: ${desde} → ${hacia}`;
+  }
   return "Con transferencia";
-
 }
 
 
@@ -173,16 +154,6 @@ export default function TabTiempoReal() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const selectedIdRef = useRef<string | null>(null);
-
-
-
-  const agentNameLookup = useMemo(
-
-    () => buildAgentNameLookup(agentes),
-
-    [agentes],
-
-  );
 
 
 
@@ -318,7 +289,7 @@ export default function TabTiempoReal() {
 
       agenteId: conv.agenteId,
 
-      agenteNombre: agenteLabel(conv, agentNameLookup),
+      agenteNombre: agenteLabel(conv, agentes),
 
       cola: conv.cola,
 
@@ -428,9 +399,9 @@ export default function TabTiempoReal() {
 
                   const nombre = etiquetaConversacionActiva(c);
 
-                  const agente = agenteLabel(c, agentNameLookup);
+                  const agente = agenteLabel(c, agentes);
 
-                  const transferencia = transferenciaTexto(c);
+                  const transferencia = transferenciaTexto(c, agentes);
 
                   return (
 
@@ -580,7 +551,7 @@ export default function TabTiempoReal() {
 
                   {estadoLabel(selected.estado)} · Agente:{" "}
 
-                  {agenteLabel(selected, agentNameLookup)}
+                  {agenteLabel(selected, agentes)}
 
                   {selected.cola && selected.cola !== "—"
 
@@ -590,14 +561,10 @@ export default function TabTiempoReal() {
 
                 </p>
 
-                {transferenciaTexto(selected) && (
-
+                {transferenciaTexto(selected, agentes) && (
                   <p className="text-xs text-amber-700 dark:text-amber-400">
-
-                    {transferenciaTexto(selected)}
-
+                    {transferenciaTexto(selected, agentes)}
                   </p>
-
                 )}
 
               </div>

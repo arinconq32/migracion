@@ -3,7 +3,11 @@
   "version": "2.3.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3000",
+    "build:embed": "npm --prefix vue-chats run build:embed",
+    "prebuild": "npm run build:embed",
+    "dev:next": "next dev -p 3000",
+    "dev:embed": "npm --prefix vue-chats run build:embed:watch",
+    "dev": "npm run build:embed && concurrently -k -n embed,next -c green,blue \"npm run dev:embed\" \"npm run dev:next\"",
     "build": "next build",
     "start": "next start",
     "lint": "eslint ."
@@ -39,6 +43,7 @@
     "@types/react": "^19.2.1",
     "@types/react-dom": "^19.2.1",
     "@types/react-transition-group": "^4.4.12",
+    "concurrently": "^9.2.1",
     "eslint": "^9.39.1",
     "eslint-config-next": "16.0.7",
     "postcss": "^8.5.6",

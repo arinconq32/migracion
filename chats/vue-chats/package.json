@@ -8,6 +8,7 @@
     "dev:socket": "npm --prefix backend run dev",
     "build": "vite build",
     "build:embed": "vite build",
+    "build:embed:watch": "vite build --watch",
     "preview": "vite preview"
   },
   "dependencies": {

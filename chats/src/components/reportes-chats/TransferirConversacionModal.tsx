@@ -4,7 +4,11 @@ import React, { useEffect, useState } from "react";
 import Button from "@/components/ui/button/Button";
 import { Modal } from "@/components/ui/modal";
 import {
+  formatAgenteEtiqueta,
+  formatAgenteLineaPrincipal,
+  formatAgenteLineaSecundaria,
   getAgentes,
+  resolveAgente,
   transferirConversacion,
   type Agente,
 } from "@/lib/reportesChatsApi";
@@ -72,9 +76,17 @@ export default function TransferirConversacionModal({
     }
   };
 
-  const agenteDestinoInfo = agentes.find(
-    (ag) => String(ag.id) === agenteDestino,
-  );
+  const agenteOrigenInfo = conversacion
+    ? resolveAgente(
+        conversacion.agenteId,
+        agentes,
+        conversacion.agenteNombre,
+      )
+    : null;
+
+  const agenteDestinoResuelto = agenteDestino
+    ? resolveAgente(agenteDestino, agentes)
+    : null;
 
   const selectClass =
     "h-11 w-full rounded-lg border border-gray-300 px-4 py-2.5 text-sm dark:border-gray-700 dark:bg-gray-900 dark:text-white/90";
@@ -123,9 +135,16 @@ export default function TransferirConversacionModal({
                 Desde
               </p>
               <p className="mt-2 text-sm font-semibold text-gray-800 dark:text-white">
-                {conversacion?.agenteNombre || conversacion?.agenteId || "—"}
+                {agenteOrigenInfo
+                  ? formatAgenteLineaPrincipal(agenteOrigenInfo)
+                  : "—"}
               </p>
-              <p className="text-xs text-gray-500">ID: {conversacion?.agenteId}</p>
+              {agenteOrigenInfo &&
+                formatAgenteLineaSecundaria(agenteOrigenInfo) && (
+                  <p className="text-xs text-gray-500">
+                    {formatAgenteLineaSecundaria(agenteOrigenInfo)}
+                  </p>
+                )}
             </div>
 
             <div className="flex shrink-0 items-center text-gray-400">
@@ -148,14 +167,16 @@ export default function TransferirConversacionModal({
               <p className="text-xs font-medium uppercase tracking-wide text-gray-400">
                 Hacia
               </p>
-              {agenteDestino ? (
+              {agenteDestino && agenteDestinoResuelto ? (
                 <>
                   <p className="mt-2 text-sm font-semibold text-gray-800 dark:text-white">
-                    {agenteDestinoInfo?.nombre ||
-                      agenteDestinoInfo?.usuario ||
-                      agenteDestino}
+                    {formatAgenteLineaPrincipal(agenteDestinoResuelto)}
                   </p>
-                  <p className="text-xs text-gray-500">ID: {agenteDestino}</p>
+                  {formatAgenteLineaSecundaria(agenteDestinoResuelto) && (
+                    <p className="text-xs text-gray-500">
+                      {formatAgenteLineaSecundaria(agenteDestinoResuelto)}
+                    </p>
+                  )}
                 </>
               ) : (
                 <p className="mt-2 text-sm text-gray-400">Selecciona un agente</p>
@@ -185,8 +206,7 @@ export default function TransferirConversacionModal({
                   })
                   .map((ag) => (
                     <option key={String(ag.id)} value={String(ag.id)}>
-                      {ag.nombre || ag.usuario}
-                      {ag.exten ? ` (ext. ${ag.exten})` : ""}
+                      {formatAgenteEtiqueta(resolveAgente(ag.id, agentes))}
                     </option>
                   ))}
               </select>
